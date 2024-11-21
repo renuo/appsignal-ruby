@@ -157,6 +157,12 @@ describe Appsignal::Transaction do
     end
   end
 
+  describe "SAMPLING_RATE" do
+    context "when the ENV variable is not set" do
+      it { expect(Appsignal::Transaction::SAMPLING_RATE).to eq(1) }
+    end
+  end
+
   describe "#complete" do
     let(:transaction) { create_transaction }
 
