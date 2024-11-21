@@ -167,7 +167,7 @@ describe Appsignal::Transaction do
         expect(transaction).to include_tags("foo" => "bar")
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is set to 0.5" do
+      context "when the APPSIGNAL_SAMPLING_RATE is set to 0.2" do
         before do
           stub_const("Appsignal::Transaction::SAMPLING_RATE", 0.2)
         end
@@ -195,6 +195,19 @@ describe Appsignal::Transaction do
             transaction.complete
             expect(transaction).not_to be_completed
             expect(transaction).to be_discarded
+          end
+
+          context "but an error occurred" do
+            before do
+              transaction.set_error(StandardError.new("I am evil"))
+            end
+
+            it 'samples the transaction' do
+              transaction.add_tags(:foo => "bar")
+              transaction.complete
+              expect(transaction).to be_completed
+              expect(transaction).not_to be_discarded
+            end
           end
         end
       end
