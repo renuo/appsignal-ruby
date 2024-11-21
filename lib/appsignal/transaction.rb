@@ -23,6 +23,8 @@ module Appsignal
     # @!visibility private
     ERRORS_LIMIT = 10
 
+    SAMPLING_RATE = ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f
+
     class << self
       # Create a new transaction and set it as the currently active
       # transaction.
@@ -204,7 +206,17 @@ module Appsignal
     end
 
     # @!visibility private
+    def error?
+      !@error_set.nil?
+    end
+
+    # @!visibility private
     def complete
+      if !error? && (rand > SAMPLING_RATE)
+        pause!
+        discard!
+      end
+
       if discarded?
         Appsignal.internal_logger.debug "Skipping transaction '#{transaction_id}' " \
           "because it was manually discarded."
