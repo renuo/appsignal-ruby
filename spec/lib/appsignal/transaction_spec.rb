@@ -235,7 +235,7 @@ describe Appsignal::Transaction do
         end
 
         before do
-          allow(transaction).to receive(:rand).and_return(0.0)
+          allow(transaction).to receive(:rand).and_return(0.01)
         end
 
         it "never samples the transaction" do
