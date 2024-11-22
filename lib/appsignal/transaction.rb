@@ -157,7 +157,10 @@ module Appsignal
 
     # @api private
     def complete
-      discard! if !error? && (rand > SAMPLING_RATE)
+      if !has_error? && (rand > SAMPLING_RATE)
+        pause!
+        discard!
+      end
 
       if discarded?
         Appsignal.internal_logger.debug "Skipping transaction '#{transaction_id}' " \
