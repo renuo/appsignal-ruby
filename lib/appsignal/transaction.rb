@@ -157,7 +157,7 @@ module Appsignal
 
     # @api private
     def complete
-      if !has_error? && (rand > SAMPLING_RATE)
+      if !error? && (rand > SAMPLING_RATE)
         pause!
         discard!
       end
