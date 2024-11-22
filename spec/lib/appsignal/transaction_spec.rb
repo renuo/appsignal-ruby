@@ -181,6 +181,7 @@ describe Appsignal::Transaction do
             transaction.add_tags(:foo => "bar")
             transaction.complete
             expect(transaction).to be_completed
+            expect(transaction).not_to be_paused
             expect(transaction).not_to be_discarded
           end
         end
@@ -194,6 +195,7 @@ describe Appsignal::Transaction do
             transaction.add_tags(:foo => "bar")
             transaction.complete
             expect(transaction).not_to be_completed
+            expect(transaction).to be_paused
             expect(transaction).to be_discarded
           end
 
@@ -206,6 +208,7 @@ describe Appsignal::Transaction do
               transaction.add_tags(:foo => "bar")
               transaction.complete
               expect(transaction).to be_completed
+              expect(transaction).not_to be_paused
               expect(transaction).not_to be_discarded
             end
           end
@@ -225,6 +228,7 @@ describe Appsignal::Transaction do
           transaction.add_tags(:foo => "bar")
           transaction.complete
           expect(transaction).to be_completed
+          expect(transaction).not_to be_paused
           expect(transaction).not_to be_discarded
         end
       end
@@ -242,6 +246,7 @@ describe Appsignal::Transaction do
           transaction.add_tags(:foo => "bar")
           transaction.complete
           expect(transaction).not_to be_completed
+          expect(transaction).to be_paused
           expect(transaction).to be_discarded
         end
       end
