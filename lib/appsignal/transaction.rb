@@ -151,15 +151,14 @@ module Appsignal
       false
     end
 
-    def has_error?
+    def error?
       !@error_set.nil?
     end
 
     # @api private
     def complete
-      if !has_error? && (rand > SAMPLING_RATE)
-        discard!
-      end
+      discard! if !error? && (rand > SAMPLING_RATE)
+
       if discarded?
         Appsignal.internal_logger.debug "Skipping transaction '#{transaction_id}' " \
           "because it was manually discarded."
