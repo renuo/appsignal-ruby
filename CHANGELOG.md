@@ -1,5 +1,118 @@
 # AppSignal for Ruby gem Changelog
 
+## 4.3.1
+
+_Published on 2024-12-20._
+
+### Fixed
+
+- Fix a performance issue when sanitising `INSERT INTO ... VALUES` queries. (patch [9791d9a1](https://github.com/appsignal/appsignal-ruby/commit/9791d9a1ef18bd18b96ad449cae90425a621bfb3))
+
+## 4.3.0
+
+_Published on 2024-12-20._
+
+### Added
+
+- Add logger broadcasting. This change implements an alternative within `Appsignal::Logger` to `ActiveSupport::BroadcastLogger`, following the same interface. This enables a proper workaround to the issues with `ActiveSupport::BroadcastLogger` (([#49745](https://github.com/rails/rails/issues/49745), [#51883](https://github.com/rails/rails/issues/51883))) when used alongside tagged logging.
+
+  For example, to use tagged logging both in logs emitted by the default `Rails.logger` and in logs sent to AppSignal, replace the `Rails.logger` with an AppSignal logger that broadcasts to the default `Rails.logger`:
+
+  ```ruby
+  appsignal_logger = Appsignal::Logger.new("app")
+  appsignal_logger.broadcast_to(Rails.logger)
+  Rails.logger = ActiveSupport::TaggedLogging.new(appsignal_logger)
+  ```
+
+  (minor [5cb1464b](https://github.com/appsignal/appsignal-ruby/commit/5cb1464bcf12f043774fb55850e6b82aeba9c1ca))
+
+### Removed
+
+- Remove tagged logging support from `Appsignal::Logger`.
+
+  Tagged logging is still supported by wrapping an instance of `Appsignal::Logger` with `ActiveSupport::TaggedLogging`:
+
+  ```ruby
+  appsignal_logger = Appsignal::Logger.new("rails")
+  tagged_logger = ActiveSupport::TaggedLogging.new(appsignal_logger)
+  Rails.logger = tagged_logger
+  ```
+
+  Removing this functionality allows for a workaround to issues within Rails ([#49745](https://github.com/rails/rails/issues/49745), [#51883](https://github.com/rails/rails/issues/51883)), where using the broadcast logger to log to more than one tagged logger results in incorrect behaviour of the tagged logging methods, resulting in breakage throughout Rails' internals:
+
+  ```ruby
+  # We use the built-in request ID middleware as an example that triggers
+  # the issue:
+  Rails.config.log_tags = [:request_id]
+
+  appsignal_logger = Appsignal::Logger.new("rails")
+  tagged_logger = ActiveSupport::TaggedLogging.new(appsignal_logger)
+
+  # This does not work correctly, because the default `Rails.logger` is a
+  # broadcast logger that is already broadcasting to a tagged logger.
+  # When asked to broadcast to a second tagged logger, the return value of
+  # `Rails.logger.tagged { ... }` will be incorrect, in turn causing the
+  # `RequestID` middleware, which uses it internally, to return broken
+  # Rack responses.
+  Rails.logger.broadcast_to(tagged_logger)
+  ```
+
+  By reverting the changes to our logger so that it is no longer a tagged logger, we enable a workaround to this issue:
+
+  ```ruby
+  Rails.config.log_tags = [:request_id]
+
+  appsignal_logger = Appsignal::Logger.new("rails")
+
+  # This works correctly, because `appsignal_logger` is not a tagged logger.
+  # Note that `appsignal_logger` will not have the `request_id` tags.
+  Rails.logger.broadcast_to(appsignal_logger)
+  ```
+
+  (patch [c061aa4e](https://github.com/appsignal/appsignal-ruby/commit/c061aa4e3f9485a1549ea90316534cddd36e238e))
+
+### Fixed
+
+- Fix `#silence` implementation for `Appsignal::Logger`. (patch [d08a1cec](https://github.com/appsignal/appsignal-ruby/commit/d08a1cec705db71999afa9c4af36e244a7b6483a))
+
+## 4.2.3
+
+_Published on 2024-12-17._
+
+### Fixed
+
+- Fix tagged logging ArgumentError error for Rails 8. (patch [8f373074](https://github.com/appsignal/appsignal-ruby/commit/8f373074531d8285b4718c16e125a62f42774d90))
+
+## 4.2.2
+
+_Published on 2024-12-16._
+
+### Added
+
+- Support Rails/ActiveSupport tagged logging. When tags are set in apps using `Rails.logger.tagged { ... }` or with the `Rails.application.config.log_tags = [...]` config option, these tags are now included in the collected log messages.
+
+  ```ruby
+  Rails.logger.tagged(["Tag 1", "Tag 2"]) { Rails.logger.info("My message") }
+  ```
+
+  Reports this log message:
+
+  > [Tag 1] [Tag 2] My message
+
+  (patch [41e1e8f0](https://github.com/appsignal/appsignal-ruby/commit/41e1e8f076025da2420cb43c53b5f7211ae45de8))
+
+### Fixed
+
+- Fix a thread safety issue where sending check-in events simultaneously from different threads would cause several check-in schedulers to be initialised internally. This could cause some of the scheduled check-in events to never be sent to AppSignal when `Appsignal.stop` is called. (patch [c372a3f9](https://github.com/appsignal/appsignal-ruby/commit/c372a3f998b78ef5ef259be39fe198433d6ca95e))
+
+## 4.2.1
+
+_Published on 2024-12-04._
+
+### Changed
+
+- Minimize difference between Rack transaction duration and total child event durations. (patch [95c37802](https://github.com/appsignal/appsignal-ruby/commit/95c3780291241fa6de8d2c0ae9bb09d3ce42d18d))
+
 ## 4.2.0
 
 _Published on 2024-11-13._
