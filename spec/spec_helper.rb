@@ -5,6 +5,7 @@ ENV["PADRINO_ENV"] ||= "test"
 APPSIGNAL_SPEC_DIR = File.expand_path(__dir__)
 $LOAD_PATH.unshift(File.join(APPSIGNAL_SPEC_DIR, "support/stubs"))
 
+require "logger"
 Bundler.require :default
 require "cgi"
 require "rack"
@@ -100,6 +101,8 @@ RSpec.configure do |config|
     Appsignal::Testing.clear!
     Appsignal::Loaders.clear!
     Appsignal::CheckIn.clear!
+    Appsignal::Transaction.after_create.clear
+    Appsignal::Transaction.before_complete.clear
 
     clear_current_transaction!
     stop_minutely_probes

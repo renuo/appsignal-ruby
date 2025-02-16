@@ -1,5 +1,80 @@
 # AppSignal for Ruby gem Changelog
 
+## 4.4.0
+
+_Published on 2025-02-06._
+
+### Changed
+
+- Do not report error causes if the wrapper error has already been reported. This deduplicates errors and prevents the error wrapper and error cause to be reported separately, as long as the error wrapper is reported first.
+
+  ```ruby
+  error_wrapper = nil
+  error_cause = nil
+  begin
+    begin
+      raise StandardError, "error cause"
+    rescue => e
+      error_cause = e
+      raise Exception, "error wrapper"
+    end
+  rescue Exception => e
+    error_wrapper = e
+  end
+
+  Appsignal.report_error(error_wrapper) # Reports error
+  Appsignal.report_error(error_cause) # Doesn't report error
+  ```
+
+  (minor [af02b8b3](https://github.com/appsignal/appsignal-ruby/commit/af02b8b356f03b23efe83511970de62281837054))
+
+### Fixed
+
+- Fix an issue where the HTTP.rb gem integration would raise an error when a string containing non-ASCII characters is passed to the gem as the URL. (patch [fce0acdf](https://github.com/appsignal/appsignal-ruby/commit/fce0acdfe0a7f807c846c3f90fd79f994c44db0b))
+
+## 4.3.3
+
+_Published on 2025-01-17._
+
+### Added
+
+- Add support for the [Ownership](https://github.com/ankane/ownership) gem, which is used to mark different segments of the application as owned by specific teams.
+
+  The AppSignal sample will be tagged with the given owner:
+
+  ```ruby
+  class OrdersController < ApplicationController
+    owner :logistics
+    # Transactions for requests handled by this controller will be tagged
+    # in AppSignal with the "owner" tag set to "logistics"
+  end
+  ```
+
+  If several owners are set within the same transaction, the last owner will take precedence. If an error is reported in the transaction, the owner tag will be set to the owner that was set when the error was raised.
+
+  Set the [`ownership_set_namespace` configuration option](https://docs.appsignal.com/ruby/configuration/options.html#option-ownership_set_namespace) to `true` to also set the AppSignal sample's namespace to the owner. Note that doing so will cause existing performance and error incidents to be re-created with the new namespace.
+
+  Set the [`instrument_ownership` configuration option](https://docs.appsignal.com/ruby/configuration/options.html#option-instrument_ownership) to `false` to disable the integration with the Ownership gem.
+
+  (patch [865b348e](https://github.com/appsignal/appsignal-ruby/commit/865b348e1cf37193e3c31176dad47cbbd5d810bb))
+
+### Changed
+
+- Do not report `SystemExit` errors from our Rake integration. (patch [ad4f1a25](https://github.com/appsignal/appsignal-ruby/commit/ad4f1a250f00f1d1997932a3f108b0cf6b99ea43))
+- Do not report `SignalException` errors from our Rake integration. (patch [7c07a596](https://github.com/appsignal/appsignal-ruby/commit/7c07a59622426ca565c538a0c239270ebbd54f4c))
+
+### Fixed
+
+- Fix deprecation warnings when building the AppSignal gem's native extension on Ruby 3.4, by porting the extension to use the TypedData API. (patch [e2d186c9](https://github.com/appsignal/appsignal-ruby/commit/e2d186c9e79a5d03d3692c6ed84ca085e1383031))
+
+## 4.3.2
+
+_Published on 2024-12-31._
+
+### Fixed
+
+- Fix an issue where loggers, when broadcasted to by `Appsignal::Logger#broadcast_to`, would format again messages that have already been formatted by the broadcaster, causing the resulting message emitted by the logger to contain double newlines. (patch [cd2f9fbf](https://github.com/appsignal/appsignal-ruby/commit/cd2f9fbfe31b39de90bc012ddacaaf9b28fef913))
+
 ## 4.3.1
 
 _Published on 2024-12-20._
