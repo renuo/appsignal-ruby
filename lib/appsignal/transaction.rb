@@ -211,6 +211,7 @@ module Appsignal
     end
 
     # @!visibility private
+    # rubocop:disable Metrics/CyclomaticComplexity
     def complete
       if !error? && (rand > SAMPLING_RATE)
         pause!
@@ -266,6 +267,7 @@ module Appsignal
       @completed = true
       @ext.complete
     end
+    # rubocop:enable Metrics/CyclomaticComplexity
 
     # @!visibility private
     def pause!
