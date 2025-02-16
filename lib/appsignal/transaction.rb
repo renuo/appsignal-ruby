@@ -192,7 +192,7 @@ module Appsignal
     end
 
     # @api private
-    def complete
+    def complete # rubocop:disable Metrics/CyclomaticComplexity
       if !error? && (rand > SAMPLING_RATE)
         pause!
         discard!
