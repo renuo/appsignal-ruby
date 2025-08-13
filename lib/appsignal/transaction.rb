@@ -23,6 +23,7 @@ module Appsignal
     # @!visibility private
     ERRORS_LIMIT = 10
 
+    # @return [Float]
     SAMPLING_RATE = ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f
 
     class << self
