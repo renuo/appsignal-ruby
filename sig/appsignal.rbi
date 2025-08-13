@@ -1617,6 +1617,7 @@ module Appsignal
   class Transaction
     HTTP_REQUEST = T.let("http_request", T.untyped)
     BACKGROUND_JOB = T.let("background_job", T.untyped)
+    SAMPLING_RATE = T.let(ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f, T.untyped)
 
     # Create a new transaction and set it as the currently active
     # transaction.

@@ -1491,6 +1491,7 @@ module Appsignal
   class Transaction
     HTTP_REQUEST: String
     BACKGROUND_JOB: String
+    SAMPLING_RATE: Float
 
     # Create a new transaction and set it as the currently active
     # transaction.
