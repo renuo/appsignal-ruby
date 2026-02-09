@@ -1132,6 +1132,42 @@ describe Appsignal::Transaction do
         "key2" => "value2"
       )
     end
+
+    context "with config default_tags" do
+      let(:options) do
+        { :default_tags => { "config_tag" => "config_value", "another_tag" => 123 } }
+      end
+
+      it "includes default_tags from config" do
+        transaction._sample
+
+        expect(transaction).to include_tags(
+          "config_tag" => "config_value",
+          "another_tag" => 123
+        )
+      end
+
+      it "transaction tags override default_tags" do
+        transaction.add_tags("config_tag" => "transaction_value")
+        transaction._sample
+
+        expect(transaction).to include_tags(
+          "config_tag" => "transaction_value",
+          "another_tag" => 123
+        )
+      end
+
+      it "merges default_tags with transaction tags" do
+        transaction.add_tags("transaction_tag" => "transaction_value")
+        transaction._sample
+
+        expect(transaction).to include_tags(
+          "config_tag" => "config_value",
+          "another_tag" => 123,
+          "transaction_tag" => "transaction_value"
+        )
+      end
+    end
   end
 
   describe "#add_custom_data" do
