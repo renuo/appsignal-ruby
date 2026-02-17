@@ -897,7 +897,18 @@ module Appsignal
     #
     # @see https://docs.appsignal.com/ruby/instrumentation/tagging.html
     def sanitized_tags
-      @tags.select do |key, value|
+      # Start with config default_tags as base (if config is available)
+      base_tags = if Appsignal.config
+                    Appsignal.config[:default_tags] || {}
+                  else
+                    {}
+                  end
+
+      # Merge transaction tags on top (transaction tags take priority)
+      all_tags = base_tags.merge(@tags)
+
+      # Apply existing sanitization filter
+      all_tags.select do |key, value|
         ALLOWED_TAG_KEY_TYPES.any? { |type| key.is_a? type } &&
           ALLOWED_TAG_VALUE_TYPES.any? { |type| value.is_a? type }
       end

@@ -955,7 +955,8 @@ describe Appsignal::Config do
         :send_environment_metadata      => true,
         :send_params                    => true,
         :send_session_data              => true,
-        :sidekiq_report_errors          => "all"
+        :sidekiq_report_errors          => "all",
+        :default_tags                   => {}
       )
     end
 
@@ -966,6 +967,17 @@ describe Appsignal::Config do
     it "merges the options when called multiple times" do
       config.merge_dsl_options(:extra_option => "yes")
       expect(config.dsl_config).to eq(dsl_config.merge(:extra_option => "yes"))
+    end
+
+    it "logs debug message when overwriting config keys" do
+      logs = capture_logs do
+        config.merge_dsl_options(:name => "Updated Name")
+      end
+
+      expect(logs).to contains_log(
+        :debug,
+        "Config key 'name' is being overwritten"
+      )
     end
 
     describe "overriding system detected config" do
@@ -1714,6 +1726,287 @@ describe Appsignal::Config do
 
         dsl.activate_if_environment(:qa, :beta)
         expect(dsl.active).to be(false)
+      end
+    end
+
+    describe "#default_tags" do
+      context "with valid value types" do
+        it "accepts string values" do
+          dsl.default_tags = { "name" => "production" }
+          expect(dsl.default_tags).to eq("name" => "production")
+        end
+
+        it "accepts integer values" do
+          dsl.default_tags = { "port" => 8080 }
+          expect(dsl.default_tags).to eq("port" => 8080)
+        end
+
+        it "accepts boolean values" do
+          dsl.default_tags = { "enabled" => true, "disabled" => false }
+          expect(dsl.default_tags).to eq("enabled" => true, "disabled" => false)
+        end
+
+        it "accepts symbol values" do
+          dsl.default_tags = { "status" => :active }
+          expect(dsl.default_tags).to eq("status" => :active)
+        end
+      end
+
+      context "with invalid value types" do
+        it "logs warning and ignores tags with array values" do
+          logs = capture_logs do
+            dsl.default_tags = { "valid" => "ok", "invalid" => ["array"] }
+          end
+
+          expect(dsl.default_tags).to eq("valid" => "ok")
+          expect(logs).to contains_log(
+            :warn,
+            "Ignored tag 'invalid' in 'default_tags' config option because of " \
+              "invalid value type: Array. " \
+              "Tags in the 'default_tags' config option must have values of type String, Symbol, " \
+              "Integer, or Boolean."
+          )
+        end
+
+        it "logs warning and ignores tags with hash values" do
+          logs = capture_logs do
+            dsl.default_tags = { "valid" => "ok", "invalid" => { "nested" => "hash" } }
+          end
+
+          expect(dsl.default_tags).to eq("valid" => "ok")
+          expect(logs).to contains_log(
+            :warn,
+            "Ignored tag 'invalid' in 'default_tags' config option because of " \
+              "invalid value type: Hash. " \
+              "Tags in the 'default_tags' config option must have values of type String, Symbol, " \
+              "Integer, or Boolean."
+          )
+        end
+
+        it "logs warning and ignores tags with object values" do
+          logs = capture_logs do
+            dsl.default_tags = { "valid" => "ok", "invalid" => Object.new }
+          end
+
+          expect(dsl.default_tags).to eq("valid" => "ok")
+          expect(logs).to contains_log(
+            :warn,
+            "Ignored tag 'invalid' in 'default_tags' config option because of " \
+              "invalid value type: Object. " \
+              "Tags in the 'default_tags' config option must have values of type String, Symbol, " \
+              "Integer, or Boolean."
+          )
+        end
+      end
+
+      it "converts symbol keys to strings" do
+        dsl.default_tags = { :foo => "bar", :baz => "quux" }
+        expect(dsl.default_tags).to eq("foo" => "bar", "baz" => "quux")
+      end
+
+      it "accepts nil input" do
+        dsl.default_tags = nil
+        expect(dsl.default_tags).to eq({})
+      end
+
+      it "logs warning for other input types" do
+        logs = capture_logs do
+          dsl.default_tags = 123
+        end
+
+        expect(dsl.default_tags).to eq({})
+        expect(logs).to contains_log(
+          :warn,
+          "Invalid value for 'default_tags' config option: Integer. " \
+            "The 'default_tags' config option must be a Hash."
+        )
+      end
+    end
+  end
+
+  describe "default_tags option" do
+    let(:config) { build_config }
+
+    context "with default configuration" do
+      it "has empty hash as default" do
+        expect(config[:default_tags]).to eq({})
+      end
+    end
+
+    context "with environment variable" do
+      context "with valid tag pairs" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = "foo=bar,baz=quux"
+        end
+
+        it "parses the tags into a hash" do
+          expect(config[:default_tags]).to eq(
+            "foo" => "bar",
+            "baz" => "quux"
+          )
+        end
+      end
+
+      context "with whitespace" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = " foo = bar , baz = quux "
+        end
+
+        it "strips whitespace from keys and values" do
+          expect(config[:default_tags]).to eq(
+            "foo" => "bar",
+            "baz" => "quux"
+          )
+        end
+      end
+
+      context "with malformed pairs" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = "foo=bar,invalid,baz=quux,=empty_key,empty_value="
+        end
+
+        it "ignores malformed pairs" do
+          expect(config[:default_tags]).to eq(
+            "foo" => "bar",
+            "baz" => "quux"
+          )
+        end
+      end
+
+      context "with value containing equals sign" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = "url=https://example.com?foo=bar"
+        end
+
+        it "treats everything after first = as the value" do
+          expect(config[:default_tags]).to eq(
+            "url" => "https://example.com?foo=bar"
+          )
+        end
+      end
+
+      context "with empty string env var" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = ""
+        end
+
+        it "returns empty hash" do
+          expect(config[:default_tags]).to eq({})
+        end
+      end
+
+      context "with env var containing only whitespace" do
+        before do
+          ENV["APPSIGNAL_DEFAULT_TAGS"] = "   "
+        end
+
+        it "returns empty hash" do
+          expect(config[:default_tags]).to eq({})
+        end
+      end
+    end
+
+    context "with YAML configuration" do
+      let(:config_path) do
+        File.join(tmp_dir, "config", "appsignal.yml")
+      end
+
+      before do
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          <<~YAML
+            production:
+              default_tags:
+                foo: bar
+                environment: production
+          YAML
+        )
+      end
+
+      let(:config) do
+        build_config(:root_path => tmp_dir)
+      end
+
+      it "loads hash format from YAML" do
+        expect(config[:default_tags]).to eq(
+          "foo" => "bar",
+          "environment" => "production"
+        )
+      end
+
+      it "tracks default_tags as file_config" do
+        expect(config.file_config[:default_tags]).to eq(
+          "foo" => "bar",
+          "environment" => "production"
+        )
+      end
+    end
+
+    context "with multiple configuration sources" do
+      let(:config_path) do
+        File.join(tmp_dir, "config", "appsignal.yml")
+      end
+
+      before do
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          <<~YAML
+            production:
+              default_tags:
+                file_tag: from_file
+                shared_tag: file_value
+          YAML
+        )
+        ENV["APPSIGNAL_DEFAULT_TAGS"] = "env_tag=from_env,shared_tag=env_value"
+      end
+
+      let(:config) do
+        build_config(:root_path => tmp_dir)
+      end
+
+      it "env default_tags override file default_tags" do
+        expect(config[:default_tags]).to eq(
+          "env_tag" => "from_env",
+          "shared_tag" => "env_value"
+        )
+      end
+
+      it "tracks file default_tags in file_config" do
+        expect(config.file_config[:default_tags]).to eq(
+          "file_tag" => "from_file",
+          "shared_tag" => "file_value"
+        )
+      end
+
+      it "tracks env default_tags in env_config" do
+        expect(config.env_config[:default_tags]).to eq(
+          "env_tag" => "from_env",
+          "shared_tag" => "env_value"
+        )
+      end
+    end
+
+    context "with DSL configuration" do
+      it "DSL default_tags override env default_tags" do
+        ENV["APPSIGNAL_DEFAULT_TAGS"] = "env_tag=from_env"
+
+        Appsignal.configure do |dsl|
+          dsl.default_tags = { "dsl_tag" => "from_dsl" }
+        end
+
+        expect(Appsignal.config[:default_tags]).to eq(
+          "dsl_tag" => "from_dsl"
+        )
+      end
+
+      it "tracks DSL default_tags in dsl_config" do
+        Appsignal.configure do |dsl|
+          dsl.default_tags = { "dsl_tag" => "from_dsl" }
+        end
+
+        expect(Appsignal.config.dsl_config[:default_tags]).to eq("dsl_tag" => "from_dsl")
       end
     end
   end

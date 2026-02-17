@@ -132,7 +132,8 @@ module Appsignal
       :send_environment_metadata => true,
       :send_params => true,
       :send_session_data => true,
-      :sidekiq_report_errors => "all"
+      :sidekiq_report_errors => "all",
+      :default_tags => {}
     }.freeze
 
     # @!visibility private
@@ -219,6 +220,11 @@ module Appsignal
     # @!visibility private
     FLOAT_OPTIONS = {
       :cpu_count => "APPSIGNAL_CPU_COUNT"
+    }.freeze
+
+    # @!visibility private
+    HASH_OPTIONS = {
+      :default_tags => "APPSIGNAL_DEFAULT_TAGS"
     }.freeze
 
     # @!visibility private
@@ -639,7 +645,32 @@ module Appsignal
         config[option] = env_var.to_f
       end
 
+      # Configuration with hash type
+      HASH_OPTIONS.each do |option, env_key|
+        env_var = ENV.fetch(env_key, nil)
+        next unless env_var
+
+        config[option] = parse_tags_from_env(env_var)
+      end
+
       config
+    end
+
+    # Parse tags from environment variable string format "foo=bar,baz=quux"
+    # @param env_var [String] the environment variable value
+    # @return [Hash] parsed tags with string keys and values
+    # @api private
+    def parse_tags_from_env(env_var)
+      return {} if env_var.nil? || env_var.strip.empty?
+
+      env_var.split(",").each_with_object({}) do |pair, hash|
+        key, value = pair.split("=", 2)
+
+        # Skip malformed pairs (no key, no value, or missing "=")
+        next unless key && value && !key.strip.empty? && !value.strip.empty?
+
+        hash[key.strip] = value.strip
+      end
     end
 
     # Set config options based on the final user config. Fix any conflicting
@@ -891,6 +922,24 @@ module Appsignal
         end
       end
 
+      # @!group Hash Configuration Options
+
+      # @!attribute [rw] default_tags
+      #   @return [Hash] Default tags to set on all transactions
+
+      # @!endgroup
+
+      # Custom getter for default_tags to ensure consistent format
+      def default_tags
+        fetch_option(:default_tags) || {}
+      end
+
+      # Custom setter for default_tags with validation
+      def default_tags=(value)
+        parsed_tags = parse_and_validate_tags(value)
+        update_option(:default_tags, parsed_tags)
+      end
+
       private
 
       def fetch_option(key)
@@ -903,6 +952,48 @@ module Appsignal
 
       def update_option(key, value)
         @dsl_options[key] = value
+      end
+
+      # Parse tags from various input formats and validate values
+      # @param value [Hash, nil] input tags
+      # @return [Hash] validated tags with string keys
+      # @api private
+      def parse_and_validate_tags(value)
+        case value
+        when Hash
+          validate_tag_values(value)
+        when nil
+          {}
+        else
+          Appsignal.internal_logger.warn(
+            "Invalid value for 'default_tags' config option: #{value.class}. " \
+              "The 'default_tags' config option must be a Hash."
+          )
+          {}
+        end
+      end
+
+      # Validate tag values are allowed types, log errors for invalid types
+      # @param tags [Hash] tags to validate
+      # @return [Hash] tags with only valid values
+      # @api private
+      def validate_tag_values(tags)
+        tags.each_with_object({}) do |(key, value), valid_tags|
+          # Convert keys to strings for consistency
+          string_key = key.to_s
+
+          # Check if value is an allowed type
+          if [Symbol, String, Integer, TrueClass, FalseClass].any? { |type| value.is_a?(type) }
+            valid_tags[string_key] = value
+          else
+            Appsignal.internal_logger.warn(
+              "Ignored tag '#{string_key}' in 'default_tags' config option because of " \
+                "invalid value type: #{value.class}. " \
+                "Tags in the 'default_tags' config option must have values of type " \
+                "String, Symbol, Integer, or Boolean."
+            )
+          end
+        end
       end
     end
   end
