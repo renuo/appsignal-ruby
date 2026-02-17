@@ -1,5 +1,13 @@
 # AppSignal for Ruby gem Changelog
 
+## 4.8.3
+
+_Published on 2026-02-17._
+
+### Added
+
+- Add a `default_tags` configuration option. Tags set in this configuration option will be set for all transactions. (patch [3b9d9f48](https://github.com/appsignal/appsignal-ruby/commit/3b9d9f4844295d3c8f94fe750509f69f579cb372))
+
 ## 4.8.2
 
 _Published on 2026-02-05._
