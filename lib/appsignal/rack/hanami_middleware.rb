@@ -7,6 +7,7 @@ module Appsignal
       def initialize(app, options = {})
         options[:params_method] = nil
         options[:instrument_event_name] ||= "process_action.hanami"
+        options[:opentelemetry_scope] ||= ["appsignal-ruby/hanami", Appsignal::VERSION]
         super
       end
 
@@ -19,7 +20,7 @@ module Appsignal
       def add_transaction_metadata_after(transaction, request)
         action_name = fetch_hanami_action(request.env)
         transaction.set_action_if_nil(action_name) if action_name
-        transaction.add_params { params_for(request) }
+        transaction.add_request_payload { params_for(request) }
       end
 
       def params_for(request)

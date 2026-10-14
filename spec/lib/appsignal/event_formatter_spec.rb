@@ -17,6 +17,33 @@ end
 class MissingFormatMockFormatter
 end
 
+class UntitledMockFormatter < Appsignal::EventFormatter
+end
+
+class ClientMockFormatter < Appsignal::EventFormatter
+  def opentelemetry_kind
+    :client
+  end
+end
+
+class DescribedMockFormatter < Appsignal::EventFormatter
+  def opentelemetry_attributes(payload)
+    { "mock.attribute" => payload[:value] }
+  end
+end
+
+class UnrecordedMockFormatter < Appsignal::EventFormatter
+  def record?
+    false
+  end
+end
+
+class ScopedMockFormatter < Appsignal::EventFormatter
+  def opentelemetry_scope
+    ["appsignal-ruby/mock", "1.2.3"]
+  end
+end
+
 class IncorrectFormatMockFormatter < Appsignal::EventFormatter
   def format
   end
@@ -39,12 +66,32 @@ end
 
 describe Appsignal::EventFormatter do
   let(:klass) { described_class }
+
+  # Registering an event formatter writes to a registry that is shared by the
+  # whole test suite, so this file has to leave it as it found it.
+  before(:context) do
+    @formatters = Appsignal::EventFormatter.formatters.dup
+    @formatter_classes = Appsignal::EventFormatter.formatter_classes.dup
+  end
+
+  after(:context) do
+    expect(Appsignal::EventFormatter.formatters).to eq(@formatters)
+    expect(Appsignal::EventFormatter.formatter_classes).to eq(@formatter_classes)
+  end
+
   around do |example|
-    original_formatters = described_class.formatters
+    formatters = described_class.formatters.dup
+    formatter_classes = described_class.formatter_classes.dup
     example.run
-    # rubocop:disable Style/ClassVars
-    described_class.class_variable_set(:@@formatters, original_formatters)
-    # rubocop:enable Style/ClassVars
+  ensure
+    described_class.formatters.replace(formatters)
+    described_class.formatter_classes.replace(formatter_classes)
+  end
+
+  describe "the event formatters in this gem" do
+    it "inherit from Appsignal::EventFormatter" do
+      expect(klass.formatter_classes.values.uniq).to all(be < described_class)
+    end
   end
 
   describe ".register" do
@@ -66,6 +113,24 @@ describe Appsignal::EventFormatter do
         expect(klass.registered?("mock.twice")).to be_truthy
         expect(logs).to contains_log :warn,
           "Formatter for 'mock.twice' already registered, not registering 'MockFormatter'"
+      end
+    end
+
+    context "when the formatter registers itself" do
+      it "registers it where the other formatters are registered" do
+        MockFormatter.register("mock.self_register", MockFormatter)
+
+        expect(klass.registered?("mock.self_register")).to be_truthy
+        expect(klass.format("mock.self_register", {})).to eq ["title", "some value"]
+      end
+    end
+
+    context "when the formatter does not implement format" do
+      it "registers the formatter, which gives the event no title or body" do
+        klass.register("mock.untitled", UntitledMockFormatter)
+
+        expect(klass.registered?("mock.untitled")).to be_truthy
+        expect(klass.format("mock.untitled", {})).to be_nil
       end
     end
 
@@ -167,6 +232,17 @@ describe Appsignal::EventFormatter do
       end
     end
 
+    context "when the formatter unregisters itself" do
+      it "unregisters the formatter" do
+        klass.register("mock.self_unregister", MockFormatter)
+        expect(klass.registered?("mock.self_unregister")).to be_truthy
+
+        MockFormatter.unregister("mock.self_unregister")
+
+        expect(klass.registered?("mock.self_unregister")).to be_falsy
+      end
+    end
+
     context "when a formatter with the same name and class is not registered" do
       it "unregisters nothing" do
         expect do
@@ -174,6 +250,133 @@ describe Appsignal::EventFormatter do
             klass.unregister("nonse.unregister", MockFormatter)
           end.to_not(change { klass.formatters })
         end.to_not(change { klass.formatter_classes })
+      end
+    end
+  end
+
+  describe ".opentelemetry_kind" do
+    context "when the formatter declares a kind" do
+      it "returns it" do
+        klass.register("mock.client", ClientMockFormatter)
+        expect(klass.opentelemetry_kind("mock.client")).to eq(:client)
+      end
+    end
+
+    context "when the formatter declares no kind" do
+      it "returns nil" do
+        klass.register("mock", MockFormatter)
+        expect(klass.opentelemetry_kind("mock")).to be_nil
+      end
+    end
+
+    # An event can be instrumented under a Symbol name, while every formatter
+    # is registered under a String one.
+    context "when the event name is a Symbol" do
+      it "returns the kind the formatter registered under the String declares" do
+        klass.register("mock.symbol_kind", ClientMockFormatter)
+
+        expect(klass.opentelemetry_kind(:"mock.symbol_kind")).to eq(:client)
+      end
+    end
+
+    context "when no formatter with the name is registered" do
+      it "returns nil" do
+        expect(klass.opentelemetry_kind("nonsense")).to be_nil
+      end
+    end
+  end
+
+  describe ".opentelemetry_attributes" do
+    context "when the formatter describes the event" do
+      it "returns the attributes it reads from the payload" do
+        klass.register("mock.described", DescribedMockFormatter)
+        expect(klass.opentelemetry_attributes("mock.described", :value => "read"))
+          .to eq("mock.attribute" => "read")
+      end
+    end
+
+    context "when the formatter describes nothing" do
+      it "returns nil" do
+        klass.register("mock", MockFormatter)
+        expect(klass.opentelemetry_attributes("mock", {})).to be_nil
+      end
+    end
+
+    context "when the event name is a Symbol" do
+      it "returns what the formatter registered under the String describes" do
+        klass.register("mock.symbol_described", DescribedMockFormatter)
+
+        expect(klass.opentelemetry_attributes(:"mock.symbol_described", :value => "read"))
+          .to eq("mock.attribute" => "read")
+      end
+    end
+
+    context "when no formatter with the name is registered" do
+      it "returns nil" do
+        expect(klass.opentelemetry_attributes("nonsense", {})).to be_nil
+      end
+    end
+  end
+
+  describe ".opentelemetry_scope" do
+    context "when the formatter declares a scope" do
+      it "returns it" do
+        klass.register("mock.scoped", ScopedMockFormatter)
+
+        expect(klass.opentelemetry_scope("mock.scoped")).to eq(["appsignal-ruby/mock", "1.2.3"])
+      end
+    end
+
+    context "when the formatter declares no scope" do
+      it "returns nil" do
+        klass.register("mock", MockFormatter)
+
+        expect(klass.opentelemetry_scope("mock")).to be_nil
+      end
+    end
+
+    context "when the event name is a Symbol" do
+      it "returns what the formatter registered under the String declares" do
+        klass.register("mock.symbol_scoped", ScopedMockFormatter)
+
+        expect(klass.opentelemetry_scope(:"mock.symbol_scoped"))
+          .to eq(["appsignal-ruby/mock", "1.2.3"])
+      end
+    end
+
+    context "when no formatter with the name is registered" do
+      it "returns nil" do
+        expect(klass.opentelemetry_scope("nonsense")).to be_nil
+      end
+    end
+  end
+
+  describe ".record?" do
+    context "when the formatter says another integration records the event" do
+      it "returns false" do
+        klass.register("mock.elsewhere", UnrecordedMockFormatter)
+        expect(klass.record?("mock.elsewhere")).to be(false)
+      end
+    end
+
+    context "when the formatter says nothing about it" do
+      it "returns true" do
+        klass.register("mock", MockFormatter)
+        expect(klass.record?("mock")).to be(true)
+      end
+    end
+
+    context "when the event name is a Symbol" do
+      it "returns what the formatter registered under the String says" do
+        klass.register("mock.symbol_claimed", UnrecordedMockFormatter)
+
+        expect(klass.record?(:"mock.symbol_claimed")).to be(false)
+      end
+    end
+
+    context "when no formatter with the name is registered" do
+      it "returns true" do
+        expect(klass.record?("nonsense")).to be(true)
       end
     end
   end

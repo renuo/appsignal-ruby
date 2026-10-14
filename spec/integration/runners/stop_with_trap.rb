@@ -2,7 +2,6 @@ PROJECT_ROOT = "../../../".freeze
 $LOAD_PATH.unshift(File.expand_path("ext", PROJECT_ROOT))
 $LOAD_PATH.unshift(File.expand_path("lib", PROJECT_ROOT))
 
-require "fileutils"
 require "appsignal"
 
 Signal.trap("USR1") do
@@ -12,23 +11,12 @@ Signal.trap("USR1") do
   exit 0
 end
 
-# Dummy config
-Appsignal.configure(:test) do |config|
-  config.active = true
-  config.push_api_key = "abc"
-  config.name = "Signal app"
-
-  # Use a working directory in the runner's tmp dir to avoid conflicts with the
-  # host's /tmp dir
-  working_directory = "tmp/appsignal"
-  FileUtils.rm_f(working_directory)
-  FileUtils.mkdir_p(working_directory)
-  config.working_directory_path = File.join(__dir__, working_directory)
-end
-
+# Name, environment and push API key come from the env vars the Runner
+# injects (see `Runner::DEFAULT_ENV`); `Appsignal.start` loads them.
 Appsignal.start
 
 puts "Waiting for USR1 signal..."
+File.write(File.join(ENV.fetch("APPSIGNAL_WORKING_DIRECTORY_PATH"), "ready"), "")
 # Wait to keep the script alive
 loop do
   sleep 0.1

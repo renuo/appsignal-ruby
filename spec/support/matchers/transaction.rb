@@ -63,7 +63,7 @@ define_transaction_sample_matcher_for(:error_causes)
 
 RSpec::Matchers.define :be_completed do
   match(:notify_expectation_failures => true) do |transaction|
-    values_match? transaction.ext._completed?, true
+    values_match? transaction.backend._completed?, true
   end
 end
 
@@ -108,7 +108,13 @@ RSpec::Matchers.define :include_event do |event|
   match_when_negated(:notify_expectation_failures => true) do |transaction|
     events = transaction.to_h["events"]
     if event
-      expect(events).to_not include(format_event(event))
+      # Match on the given keys alone, rather than through `format_event`. Every
+      # key the caller leaves out is given a default there, and an event that
+      # differs from that default in any of them does not match. So an event
+      # ruled out by name alone still matched nothing as soon as it had a title,
+      # which nearly every event has, and the expectation passed while the event
+      # it ruled out was there all along.
+      expect(events).to_not include(hash_including(event.transform_keys(&:to_s)))
     else
       expect(events).to be_empty
     end
@@ -163,7 +169,8 @@ RSpec::Matchers.define :include_breadcrumb do |action, category, message, metada
       breadcrumb = format_breadcrumb(action, category, message, metadata, time)
       expect(breadcrumbs).to_not include(breadcrumb)
     else
-      expect(breadcrumbs).to_not be_any
+      # No breadcrumbs added means no breadcrumbs sample data at all (nil).
+      expect(breadcrumbs || []).to_not be_any
     end
   end
 
@@ -181,7 +188,7 @@ RSpec::Matchers.alias_matcher :include_breadcrumbs, :include_breadcrumb
 
 RSpec::Matchers.define :have_queue_start do |queue_start_time|
   match(:notify_expectation_failures => true) do |transaction|
-    actual_start = transaction.ext.queue_start
+    actual_start = transaction.backend.queue_start
     if queue_start_time
       expect(actual_start).to eq(queue_start_time)
     else
@@ -190,7 +197,7 @@ RSpec::Matchers.define :have_queue_start do |queue_start_time|
   end
 
   match_when_negated(:notify_expectation_failures => true) do |transaction|
-    actual_start = transaction.ext.queue_start
+    actual_start = transaction.backend.queue_start
     if queue_start_time
       expect(actual_start).to_not eq(queue_start_time)
     else

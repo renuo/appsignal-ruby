@@ -25,111 +25,221 @@ if DependencyHelper.que_present?
       let(:instance) { job.new(job_attrs) }
       before do
         allow(Que).to receive(:execute)
-
-        start_agent
       end
-      around { |example| keep_transactions { example.run } }
 
       def perform_que_job(job)
         job._run
       end
 
       context "without exception" do
-        it "creates a transaction for a job" do
-          expect do
-            perform_que_job(instance)
-          end.to change { created_transactions.length }.by(1)
+        def perform
+          perform_que_job(instance)
+        end
 
-          transaction = last_transaction
-          expect(transaction).to have_id
-          expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
-          expect(transaction).to have_action("MyQueJob#run")
-          expect(transaction).to_not have_error
-          expect(transaction).to include_event(
-            "body" => "",
-            "body_format" => Appsignal::EventFormatter::DEFAULT,
-            "count" => 1,
-            "name" => "perform_job.que",
-            "title" => ""
-          )
-          expect(transaction).to include_params(
-            "arguments" => %w[post_id_123 user_id_123]
-          )
-          if DependencyHelper.que2_present?
+        describe "creates a transaction for a job" do
+          it "in agent mode", :agent_mode do
+            start_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            transaction = last_transaction
+            expect(transaction).to have_id
+            expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
+            expect(transaction).to have_action("MyQueJob#run")
+            expect(transaction).to_not have_error
+            expect(transaction).to include_event(
+              "body" => "",
+              "body_format" => Appsignal::EventFormatter::DEFAULT,
+              "count" => 1,
+              "name" => "perform_job.que",
+              "title" => ""
+            )
             expect(transaction).to include_params(
-              "keyword_arguments" => {}
+              "arguments" => %w[post_id_123 user_id_123]
             )
-          else
-            expect(transaction).to_not include_params(
-              "keyword_arguments" => anything
+            if DependencyHelper.que2_present?
+              expect(transaction).to include_params(
+                "keyword_arguments" => {}
+              )
+            else
+              expect(transaction).to_not include_params(
+                "keyword_arguments" => anything
+              )
+            end
+            expect(transaction).to include_tags(
+              "attempts" => 0,
+              "id" => 123,
+              "priority" => 100,
+              "queue" => "dfl",
+              "run_at" => fixed_time.to_s
             )
+            expect(transaction).to be_completed
           end
-          expect(transaction).to include_tags(
-            "attempts" => 0,
-            "id" => 123,
-            "priority" => 100,
-            "queue" => "dfl",
-            "run_at" => fixed_time.to_s
-          )
-          expect(transaction).to be_completed
+
+          it "in collector mode", :collector_mode do
+            start_collector_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            expect(root_span.kind).to eq(:consumer)
+            expect(root_span.attributes["messaging.system"]).to eq("que")
+            expect(root_span.attributes["messaging.operation.name"]).to eq("perform")
+            expect(root_span.attributes["messaging.operation.type"]).to eq("process")
+            expect(root_span.attributes["messaging.destination.name"]).to eq("dfl")
+            expect(root_span.attributes["appsignal.namespace"])
+              .to eq("background")
+            expect(root_span.attributes["appsignal.action_name"]).to eq("MyQueJob#run")
+            expect(exception_events).to be_empty
+            span = event_spans.find { |s| s.name == "perform_job.que" }
+            expect(span.attributes["messaging.system"]).to eq("que")
+            expect(span.attributes["messaging.operation.name"]).to eq("perform")
+            expect(span.attributes["messaging.operation.type"]).to eq("process")
+            expect(span.attributes["messaging.destination.name"]).to eq("dfl")
+            expect(span).not_to be_nil
+            expect(span.parent_span_id).to eq(root_span.span_id)
+            expect(span.attributes).not_to have_key("appsignal.body")
+            expect(event_category(span)).to eq("perform_job.que")
+            expect(scope_of(root_span)).to eq(["appsignal-ruby/que", Appsignal::VERSION])
+            expect(scope_of(span)).to eq(["appsignal-ruby/que", Appsignal::VERSION])
+            expected_params = { "arguments" => %w[post_id_123 user_id_123] }
+            expected_params["keyword_arguments"] = {} if DependencyHelper.que2_present?
+            expect(JSON.parse(root_span.attributes["appsignal.function.parameters"]))
+              .to eq(expected_params)
+            expect(root_span.attributes["appsignal.tag.attempts"]).to eq(0)
+            expect(root_span.attributes["appsignal.tag.id"]).to eq(123)
+            expect(root_span.attributes["appsignal.tag.priority"]).to eq(100)
+            expect(root_span.attributes["appsignal.tag.queue"]).to eq("dfl")
+            expect(root_span.attributes["appsignal.tag.run_at"]).to eq(fixed_time.to_s)
+            expect(last_transaction).to be_completed
+          end
         end
       end
 
       context "with exception" do
         let(:error) { ExampleException.new("oh no!") }
 
-        it "reports exceptions and re-raise them" do
+        before do
           allow(instance).to receive(:run).and_raise(error)
+        end
 
+        def perform
           expect do
-            expect do
-              perform_que_job(instance)
-            end.to raise_error(ExampleException)
-          end.to change { created_transactions.length }.by(1)
+            perform_que_job(instance)
+          end.to raise_error(ExampleException)
+        end
 
-          transaction = last_transaction
-          expect(transaction).to have_id
-          expect(transaction).to have_action("MyQueJob#run")
-          expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
-          expect(transaction).to have_error(error.class.name, error.message)
-          expect(transaction).to include_params(
-            "arguments" => %w[post_id_123 user_id_123]
-          )
-          expect(transaction).to include_tags(
-            "attempts" => 0,
-            "id" => 123,
-            "priority" => 100,
-            "queue" => "dfl",
-            "run_at" => fixed_time.to_s
-          )
-          expect(transaction).to be_completed
+        describe "reports exceptions and re-raises them" do
+          it "in agent mode", :agent_mode do
+            start_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            transaction = last_transaction
+            expect(transaction).to have_id
+            expect(transaction).to have_action("MyQueJob#run")
+            expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
+            expect(transaction).to have_error(error.class.name, error.message)
+            expect(transaction).to include_params(
+              "arguments" => %w[post_id_123 user_id_123]
+            )
+            expect(transaction).to include_tags(
+              "attempts" => 0,
+              "id" => 123,
+              "priority" => 100,
+              "queue" => "dfl",
+              "run_at" => fixed_time.to_s
+            )
+            expect(transaction).to be_completed
+          end
+
+          it "in collector mode", :collector_mode do
+            start_collector_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            expect(root_span.kind).to eq(:consumer)
+            expect(root_span.attributes["appsignal.action_name"]).to eq("MyQueJob#run")
+            expect(root_span.attributes["appsignal.namespace"])
+              .to eq("background")
+            event = exception_events.find { |e| e.attributes["exception.type"] == error.class.name }
+            expect(event).not_to be_nil
+            expect(event.attributes["exception.message"]).to eq(error.message)
+            expect(event.attributes["exception.stacktrace"]).to be_a(String)
+            expect(event.attributes["appsignal.alert_this_error"]).to eq(true)
+            expected_params = { "arguments" => %w[post_id_123 user_id_123] }
+            expected_params["keyword_arguments"] = {} if DependencyHelper.que2_present?
+            expect(JSON.parse(root_span.attributes["appsignal.function.parameters"]))
+              .to eq(expected_params)
+            expect(root_span.attributes["appsignal.tag.attempts"]).to eq(0)
+            expect(root_span.attributes["appsignal.tag.id"]).to eq(123)
+            expect(root_span.attributes["appsignal.tag.priority"]).to eq(100)
+            expect(root_span.attributes["appsignal.tag.queue"]).to eq("dfl")
+            expect(root_span.attributes["appsignal.tag.run_at"]).to eq(fixed_time.to_s)
+            expect(last_transaction).to be_completed
+          end
         end
       end
 
       context "with error" do
         let(:error) { ExampleStandardError.new("oh no!") }
 
-        it "reports errors and not re-raise them" do
+        before do
           allow(instance).to receive(:run).and_raise(error)
+        end
 
-          expect { perform_que_job(instance) }.to change { created_transactions.length }.by(1)
+        def perform
+          perform_que_job(instance)
+        end
 
-          transaction = last_transaction
-          expect(transaction).to have_id
-          expect(transaction).to have_action("MyQueJob#run")
-          expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
-          expect(transaction).to have_error(error.class.name, error.message)
-          expect(transaction).to include_params(
-            "arguments" => %w[post_id_123 user_id_123]
-          )
-          expect(transaction).to include_tags(
-            "attempts" => 0,
-            "id" => 123,
-            "priority" => 100,
-            "queue" => "dfl",
-            "run_at" => fixed_time.to_s
-          )
-          expect(transaction).to be_completed
+        # Que 0.x handles the error inside its own `_run` and counts the failed
+        # attempt there. That happens before the plugin reads the job attributes,
+        # so it reports one attempt. Que 1 and up leave the count to the worker,
+        # so they still report none here.
+        let(:expected_attempts) { DependencyHelper.que1_present? ? 0 : 1 }
+
+        describe "reports errors and does not re-raise them" do
+          it "in agent mode", :agent_mode do
+            start_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            transaction = last_transaction
+            expect(transaction).to have_id
+            expect(transaction).to have_action("MyQueJob#run")
+            expect(transaction).to have_namespace(Appsignal::Transaction::BACKGROUND_JOB)
+            expect(transaction).to have_error(error.class.name, error.message)
+            expect(transaction).to include_params(
+              "arguments" => %w[post_id_123 user_id_123]
+            )
+            expect(transaction).to include_tags(
+              "attempts" => expected_attempts,
+              "id" => 123,
+              "priority" => 100,
+              "queue" => "dfl",
+              "run_at" => fixed_time.to_s
+            )
+            expect(transaction).to be_completed
+          end
+
+          it "in collector mode", :collector_mode do
+            start_collector_agent
+            expect { perform }.to change { created_transactions.length }.by(1)
+
+            expect(root_span.kind).to eq(:consumer)
+            expect(root_span.attributes["appsignal.action_name"]).to eq("MyQueJob#run")
+            expect(root_span.attributes["appsignal.namespace"])
+              .to eq("background")
+            event = exception_events.find { |e| e.attributes["exception.type"] == error.class.name }
+            expect(event).not_to be_nil
+            expect(event.attributes["exception.message"]).to eq(error.message)
+            expect(event.attributes["exception.stacktrace"]).to be_a(String)
+            expect(event.attributes["appsignal.alert_this_error"]).to eq(true)
+            expected_params = { "arguments" => %w[post_id_123 user_id_123] }
+            expected_params["keyword_arguments"] = {} if DependencyHelper.que2_present?
+            expect(JSON.parse(root_span.attributes["appsignal.function.parameters"]))
+              .to eq(expected_params)
+            expect(root_span.attributes["appsignal.tag.attempts"]).to eq(expected_attempts)
+            expect(root_span.attributes["appsignal.tag.id"]).to eq(123)
+            expect(root_span.attributes["appsignal.tag.priority"]).to eq(100)
+            expect(root_span.attributes["appsignal.tag.queue"]).to eq("dfl")
+            expect(root_span.attributes["appsignal.tag.run_at"]).to eq(fixed_time.to_s)
+            expect(last_transaction).to be_completed
+          end
         end
       end
 
@@ -154,13 +264,31 @@ if DependencyHelper.que_present?
             end
           end
 
-          it "reports keyword arguments as parameters" do
+          def perform
             perform_que_job(instance)
+          end
 
-            expect(last_transaction).to include_params(
-              "arguments" => %w[post_id_123],
-              "keyword_arguments" => { "user_id" => "user_id_123" }
-            )
+          describe "reports keyword arguments as parameters" do
+            it "in agent mode", :agent_mode do
+              start_agent
+              perform
+
+              expect(last_transaction).to include_params(
+                "arguments" => %w[post_id_123],
+                "keyword_arguments" => { "user_id" => "user_id_123" }
+              )
+            end
+
+            it "in collector mode", :collector_mode do
+              start_collector_agent
+              perform
+
+              expect(JSON.parse(root_span.attributes["appsignal.function.parameters"]))
+                .to eq(
+                  "arguments" => %w[post_id_123],
+                  "keyword_arguments" => { "user_id" => "user_id_123" }
+                )
+            end
           end
         end
       end
@@ -174,17 +302,336 @@ if DependencyHelper.que_present?
           end
         end
 
-        it "uses the custom action" do
+        def perform
           perform_que_job(instance)
+        end
 
-          transaction = last_transaction
-          expect(transaction).to have_action("MyCustomJob#perform")
-          expect(transaction).to be_completed
+        describe "uses the custom action" do
+          it "in agent mode", :agent_mode do
+            start_agent
+            perform
+
+            transaction = last_transaction
+            expect(transaction).to have_action("MyCustomJob#perform")
+            expect(transaction).to be_completed
+          end
+
+          it "in collector mode", :collector_mode do
+            start_collector_agent
+            perform
+
+            expect(root_span.attributes["appsignal.action_name"])
+              .to eq("MyCustomJob#perform")
+            expect(last_transaction).to be_completed
+          end
+        end
+      end
+
+      # Que only has tags from version 1.0 on, and they are the only carrier the
+      # trace context can ride on, so this is Que 1 and up only.
+      context "with incoming trace context", :if => DependencyHelper.que1_present? do
+        let(:trace_id_hex) { "0af7651916cd43dd8448eb211c80319c" }
+        let(:span_id_hex) { "b7ad6b7169203331" }
+        let(:traceparent) { "00-#{trace_id_hex}-#{span_id_hex}-01" }
+        # OpenTelemetry's Que instrumentation carries the trace context as
+        # "key:value" tag strings under the job's `data` attribute.
+        let(:job_attrs) do
+          super().merge(:data => { :tags => ["traceparent:#{traceparent}"] })
+        end
+
+        def perform
+          perform_que_job(instance)
+        end
+
+        it "in agent mode", :agent_mode do
+          start_agent
+          expect { perform }.to change { created_transactions.length }.by(1)
+          expect(last_transaction).to be_completed
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          perform
+
+          # The job continues the enqueuer's trace as a child and links back to it.
+          expect(root_span.kind).to eq(:consumer)
+          expect(root_span.hex_trace_id).to eq(trace_id_hex)
+          expect(root_span.parent_span_id.unpack1("H*")).to eq(span_id_hex)
+          expect(root_span.links.size).to eq(1)
+          link_context = root_span.links.first.span_context
+          expect(link_context.hex_trace_id).to eq(trace_id_hex)
+          expect(link_context.hex_span_id).to eq(span_id_hex)
+        end
+      end
+
+      # The Active Job adapter enqueues a wrapper class with the serialized job
+      # data as its only argument, so an Active Job job carries its context
+      # there rather than in the job's tags. That works on every Que version,
+      # including the ones with no tags to carry a context in at all.
+      context "with incoming trace context from an Active Job job" do
+        let(:trace_id_hex) { "0af7651916cd43dd8448eb211c80319c" }
+        let(:span_id_hex) { "b7ad6b7169203331" }
+        let(:traceparent) { "00-#{trace_id_hex}-#{span_id_hex}-01" }
+        # Que reads a job's arguments back out of JSONB with symbol keys, so
+        # that is the shape the integration has to read.
+        let(:job_attrs) do
+          super().merge(
+            :job_class => Appsignal::Integrations::QueTraceContext::ACTIVE_JOB_WRAPPER,
+            :args => [
+              {
+                :job_class => "MyActiveJob",
+                :arguments => [],
+                :__otel_headers => [["traceparent", traceparent]]
+              }
+            ]
+          )
+        end
+        let(:job) do
+          Class.new(::Que::Job) do
+            def run(job_data)
+            end
+          end
+        end
+
+        def perform
+          perform_que_job(instance)
+        end
+
+        it "in agent mode", :agent_mode do
+          start_agent
+          expect { perform }.to change { created_transactions.length }.by(1)
+          expect(last_transaction).to be_completed
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          perform
+
+          expect(root_span.kind).to eq(:consumer)
+          expect(root_span.hex_trace_id).to eq(trace_id_hex)
+          expect(root_span.parent_span_id.unpack1("H*")).to eq(span_id_hex)
+          expect(root_span.links.size).to eq(1)
+        end
+      end
+
+      if DependencyHelper.active_job_present? && DependencyHelper.que2_present?
+        # A round trip through real Active Job and the real Que adapter. The
+        # enqueue writes the trace context onto the job and Active Job
+        # serializes it; the arguments are then put through Que's own JSON
+        # round trip, which is what turns their keys into symbols on the way
+        # back out of the database. That symbol-keyed shape is the one the
+        # integration has to read, and it is not obvious from the enqueue side,
+        # so it is worth producing rather than assuming.
+        context "with a job enqueued through real Active Job" do
+          before do
+            require "active_job"
+            # Que ships the adapter but only requires it from its railtie.
+            require "que/active_job/extensions"
+            ActiveJob::Base.queue_adapter = :que
+            ActiveJob::Base.logger = nil
+
+            stub_const("QueRoundTripJob", Class.new(ActiveJob::Base) do
+              def perform(*)
+              end
+            end)
+          end
+
+          let(:job) do
+            Class.new(::Que::Job) do
+              def run(job_data)
+              end
+            end
+          end
+
+          # Enqueues with a real Active Job job, captures the arguments Que would
+          # have inserted, and hands them back in the shape Que reads them in.
+          def enqueue_then_perform
+            enqueued = nil
+            allow(::Que).to receive(:execute) do |_command, values = nil|
+              enqueued ||= values
+              # Que builds the job it returns from the inserted row, and the
+              # adapter reads an id off it.
+              [{ :id => 1 }]
+            end
+
+            set_current_transaction(http_request_transaction)
+            QueRoundTripJob.perform_later("foo")
+            Appsignal::Transaction.complete_current!
+
+            # Que stores the arguments as JSONB and reads them back with
+            # symbolized keys. Use Que's own serializer so the shape is Que's,
+            # not this example's idea of it.
+            args_json = enqueued.find do |value|
+              value.is_a?(String) && value.start_with?("[")
+            end
+            args = ::Que.deserialize_json(args_json)
+            attrs = job_attrs.merge(
+              :job_class => Appsignal::Integrations::QueTraceContext::ACTIVE_JOB_WRAPPER,
+              :args => args
+            )
+            perform_que_job(job.new(attrs))
+            args
+          end
+
+          it "in collector mode", :collector_mode do
+            start_collector_agent
+
+            args = enqueue_then_perform
+
+            producer = event_span_for("enqueue.active_job")
+
+            # The shape the integration reads, as Active Job, the Que adapter and
+            # Que's own JSON round trip really produce it. The examples that
+            # construct this shape by hand are only valid as long as this holds.
+            expect(args.size).to eq(1)
+            expect(args.first[:__otel_headers]).to eq(
+              [["traceparent", "00-#{producer.hex_trace_id}-#{producer.hex_span_id}-01"]]
+            )
+
+            consumer = span_exporter.finished_spans.find do |span|
+              span.kind == :consumer
+            end
+            expect(consumer).to_not be_nil
+            expect(consumer.hex_trace_id).to eq(producer.hex_trace_id)
+            expect(consumer.parent_span_id).to eq(producer.span_id)
+          end
+        end
+      end
+
+      # A job from an Active Job bulk enqueue carries a marker alongside its
+      # trace context, because every job in the batch shares one producer span.
+      context "with incoming trace context from an Active Job bulk enqueue" do
+        let(:trace_id_hex) { "0af7651916cd43dd8448eb211c80319c" }
+        let(:span_id_hex) { "b7ad6b7169203331" }
+        let(:traceparent) { "00-#{trace_id_hex}-#{span_id_hex}-01" }
+        let(:job_attrs) do
+          super().merge(
+            :job_class => Appsignal::Integrations::QueTraceContext::ACTIVE_JOB_WRAPPER,
+            :args => [
+              {
+                :job_class => "MyActiveJob",
+                :arguments => [],
+                :__otel_headers => [
+                  ["traceparent", traceparent],
+                  [Appsignal::OpenTelemetry::ACTIVE_JOB_BATCH_HEADER, "1"]
+                ]
+              }
+            ]
+          )
+        end
+        let(:job) do
+          Class.new(::Que::Job) do
+            def run(job_data)
+            end
+          end
+        end
+
+        def perform
+          perform_que_job(instance)
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          perform
+
+          # Every job in the batch shares the one producer span, so the job
+          # only links back to it. It gets its own trace instead of hanging the
+          # whole batch off that span.
+          expect(root_span.kind).to eq(:consumer)
+          expect(root_span.parent_span_id).to eq(::OpenTelemetry::Trace::INVALID_SPAN_ID)
+          expect(root_span.hex_trace_id).to_not eq(trace_id_hex)
+          expect(root_span.links.size).to eq(1)
+          expect(root_span.links.first.span_context.hex_trace_id).to eq(trace_id_hex)
+        end
+      end
+
+      # A job enqueued by a service that instruments Que but not Active Job has
+      # no Active Job carrier to read, so the job's tags are what the trace has
+      # to be continued from.
+      context "with an Active Job job carrying only a tag context",
+        :if => DependencyHelper.que1_present? do
+        let(:trace_id_hex) { "0af7651916cd43dd8448eb211c80319c" }
+        let(:span_id_hex) { "b7ad6b7169203331" }
+        let(:job_attrs) do
+          super().merge(
+            :job_class => Appsignal::Integrations::QueTraceContext::ACTIVE_JOB_WRAPPER,
+            :args => [{ :job_class => "MyActiveJob", :arguments => [] }],
+            :data => {
+              :tags => ["traceparent:00-#{trace_id_hex}-#{span_id_hex}-01"]
+            }
+          )
+        end
+        let(:job) do
+          Class.new(::Que::Job) do
+            def run(job_data)
+            end
+          end
+        end
+
+        def perform
+          perform_que_job(instance)
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          perform
+
+          expect(root_span.hex_trace_id).to eq(trace_id_hex)
+          expect(root_span.parent_span_id.unpack1("H*")).to eq(span_id_hex)
+        end
+      end
+
+      # Only Que 2's `bulk_enqueue` writes the bulk tag, but reading it back is
+      # the same on every version that has tags, so this runs on Que 1 too.
+      context "with incoming trace context from a bulk enqueue",
+        :if => DependencyHelper.que1_present? do
+        let(:trace_id_hex) { "0af7651916cd43dd8448eb211c80319c" }
+        let(:span_id_hex) { "b7ad6b7169203331" }
+        let(:job_attrs) do
+          super().merge(
+            :data => {
+              :tags => [
+                "traceparent:00-#{trace_id_hex}-#{span_id_hex}-01",
+                Appsignal::Integrations::QueTraceContext::BULK_TAG
+              ]
+            }
+          )
+        end
+
+        def perform
+          perform_que_job(instance)
+        end
+
+        it "in agent mode", :agent_mode do
+          start_agent
+          expect { perform }.to change { created_transactions.length }.by(1)
+          expect(last_transaction).to be_completed
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          perform
+
+          # Every job in the batch shares the one producer span, so the job only
+          # links back to it. It gets its own trace instead of hanging the whole
+          # batch off that span.
+          expect(root_span.kind).to eq(:consumer)
+          expect(root_span.parent_span_id).to eq(::OpenTelemetry::Trace::INVALID_SPAN_ID)
+          expect(root_span.hex_trace_id).to_not eq(trace_id_hex)
+
+          expect(root_span.links.size).to eq(1)
+          link_context = root_span.links.first.span_context
+          expect(link_context.hex_trace_id).to eq(trace_id_hex)
+          expect(link_context.hex_span_id).to eq(span_id_hex)
         end
       end
     end
   end
 
+  # Enqueue-side propagation reads context from the job's tags. The carrier
+  # (tags serialized into the job's `data`) is identical on Que 1 and Que 2, so
+  # this is covered on both versions. Que 0.x has no tags, so there the enqueue
+  # is only recorded as an event and nothing is propagated.
   describe Appsignal::Integrations::QueClientPlugin do
     let(:job) do
       Class.new(::Que::Job) do
@@ -202,9 +649,21 @@ if DependencyHelper.que_present?
         [{}]
       end
 
-      start_agent
+      # After enqueueing, Que 0.x wakes a worker through its adapter, which
+      # needs a database connection.
+      unless DependencyHelper.que1_present?
+        allow(Que).to receive(:adapter)
+          .and_return(double(:wake_worker_after_commit => nil))
+      end
     end
-    around { |example| keep_transactions { example.run } }
+
+    # The arguments are the fifth value Que passes to its `:insert_job` query on
+    # every version. Que 1 and up serialise them to JSON first; Que 0.x hands
+    # over the array itself.
+    def enqueued_args
+      args = captured[:values] && captured[:values][4]
+      args.is_a?(String) ? JSON.parse(args) : args
+    end
 
     # `data` is the last value Que passes to its `:insert_job` query on both Que
     # 1 and Que 2 (Que 2 inserts `kwargs` before it, shifting its index); the
@@ -214,12 +673,30 @@ if DependencyHelper.que_present?
       data ? JSON.parse(data)["tags"] : nil
     end
 
+    # Que 0.x has no `job_options` keyword and no tags. It reads its scheduling
+    # options from top-level keys in a trailing hash instead. So the tags are
+    # only passed on Que 1 and up.
     def enqueue(tags: ["user:42"])
-      job.enqueue("post_id_123", :job_options => { :tags => tags })
+      if DependencyHelper.que1_present?
+        job.enqueue("post_id_123", :job_options => { :tags => tags })
+      else
+        job.enqueue("post_id_123")
+      end
+    end
+
+    # Whatever the plugin records or injects, it must leave the job's own
+    # arguments alone. This matters most on Que 0.x, which turns any keyword
+    # argument it does not recognise into an extra job argument. A keyword the
+    # plugin adds to the call itself, such as a `job_options` the caller never
+    # passed, would be persisted as a job argument and break the job when it
+    # runs.
+    def expect_job_arguments_untouched
+      expect(enqueued_args).to eq(["post_id_123"])
     end
 
     context "with an active transaction" do
-      it "records an enqueue event and leaves the job's tags untouched" do
+      it "in agent mode", :agent_mode do
+        start_agent
         transaction = http_request_transaction
         set_current_transaction(transaction)
 
@@ -229,34 +706,169 @@ if DependencyHelper.que_present?
         event = transaction.to_h["events"].find { |e| e["name"] == "enqueue.que" }
         expect(event).to_not be_nil
         expect(event["title"]).to eq("enqueue MyQueJob job")
-        expect(enqueued_tags).to eq(["user:42"])
+        # No wire context in agent mode; only the user's own tag persists.
+        expect(enqueued_tags).to eq(["user:42"]) if DependencyHelper.que1_present?
+        expect_job_arguments_untouched
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        enqueue
+        Appsignal::Transaction.complete_current!
+
+        # The enqueue is a producer event span under the active transaction,
+        # named after the job being enqueued.
+        producer = event_span_for("enqueue.que")
+        expect(producer.name).to eq("enqueue.que (enqueue MyQueJob job)")
+        expect(scope_of(producer)).to eq(["appsignal-ruby/que", Appsignal::VERSION])
+        expect(producer.kind).to eq(:producer)
+        expect(producer.attributes["messaging.system"]).to eq("que")
+        expect(producer.attributes["messaging.operation.name"]).to eq("enqueue")
+        expect(producer.attributes["messaging.operation.type"]).to eq("send")
+        # Que only records the queue on the job itself. An enqueue that does not
+        # name one gets Que's default, which this integration cannot see, so no
+        # queue is reported.
+        expect(producer.attributes).to_not have_key("messaging.destination.name")
+        expect(producer.parent_span_id).to eq(root_span.span_id)
+
+        if DependencyHelper.que1_present?
+          # The job carries the producer span's context as a traceparent tag,
+          # alongside the user's own tag.
+          expect(enqueued_tags).to include("user:42")
+          expect(enqueued_tags)
+            .to include("traceparent:00-#{producer.hex_trace_id}-#{producer.hex_span_id}-01")
+        end
+        expect_job_arguments_untouched
+      end
+
+      it "skips propagation rather than break the enqueue when tags are full",
+        :collector_mode, :if => DependencyHelper.que1_present? do
+        start_collector_agent
+        set_current_transaction(http_request_transaction)
+
+        # Already at Que's 5-tag limit; adding trace context would exceed it, so
+        # propagation is skipped and the enqueue still succeeds unchanged.
+        full = %w[t1 t2 t3 t4 t5]
+        expect { enqueue(:tags => full) }.to_not raise_error
+        Appsignal::Transaction.complete_current!
+
+        expect(enqueued_tags).to eq(full)
+      end
+
+      it "propagates on the last free tag and adds no bulk tag",
+        :collector_mode, :if => DependencyHelper.que1_present? do
+        start_collector_agent
+        set_current_transaction(http_request_transaction)
+
+        # A job enqueued on its own needs no bulk tag, so one free tag is enough
+        # to propagate. The batch path needs two and would skip propagation here.
+        enqueue(:tags => %w[t1 t2 t3 t4])
+        Appsignal::Transaction.complete_current!
+
+        expect(enqueued_tags).to include(a_string_starting_with("traceparent:"))
+        expect(enqueued_tags)
+          .to_not include(Appsignal::Integrations::QueTraceContext::BULK_TAG)
       end
     end
 
     context "without an active transaction" do
-      it "is a transparent pass-through" do
-        expect { enqueue }.to_not raise_error
+      it "in agent mode", :agent_mode do
+        start_agent
 
-        expect(enqueued_tags).to eq(["user:42"])
+        # No transaction to attach to: a transparent pass-through.
+        expect { enqueue }.to_not raise_error
+        expect(enqueued_tags).to eq(["user:42"]) if DependencyHelper.que1_present?
+        expect_job_arguments_untouched
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+
+        enqueue
+
+        # No transaction to attach to: nothing recorded, nothing injected.
+        expect(event_spans_for("enqueue.que")).to be_empty
+        expect(enqueued_tags).to eq(["user:42"]) if DependencyHelper.que1_present?
+        expect_job_arguments_untouched
       end
     end
 
     context "when job enqueue events are suppressed" do
       # As happens under Active Job, which records the enqueue itself.
-      it "passes through without recording the enqueue" do
+      def enqueue_suppressed(transaction)
+        transaction.suppress_job_enqueue_events { enqueue }
+      end
+
+      it "in agent mode", :agent_mode do
+        start_agent
         transaction = http_request_transaction
         set_current_transaction(transaction)
 
-        transaction.suppress_job_enqueue_events { enqueue }
+        enqueue_suppressed(transaction)
 
         # The outer integration records the enqueue, so this one doesn't.
         event_names = transaction.to_h["events"].map { |event| event["name"] }
         expect(event_names).to_not include("enqueue.que")
+        expect_job_arguments_untouched
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        enqueue_suppressed(transaction)
+        Appsignal::Transaction.complete_current!
+
+        # No producer span for the suppressed enqueue...
+        expect(event_spans_for("enqueue.que")).to be_empty
+        # ...but the trace context is still injected so the job links back.
+        if DependencyHelper.que1_present?
+          expect(enqueued_tags).to include(a_string_starting_with("traceparent:"))
+        end
+        expect_job_arguments_untouched
       end
     end
 
-    # `bulk_enqueue` is Que 2 only. The whole batch records a single
-    # `bulk_enqueue.que` event; the inner enqueues are pass-throughs.
+    context "when enqueue instrumentation is disabled" do
+      let(:start_agent_args) do
+        { :options => { :enable_job_enqueue_instrumentation => false } }
+      end
+
+      it "in agent mode", :agent_mode do
+        start_agent(**start_agent_args)
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        enqueue
+
+        event_names = transaction.to_h["events"].map { |event| event["name"] }
+        expect(event_names).to_not include("enqueue.que")
+        expect_job_arguments_untouched
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        enqueue
+        Appsignal::Transaction.complete_current!
+
+        # No enqueue event means no producer span, so there is nothing for the
+        # performing job to link back to and no trace context is written. The
+        # job starts its own trace instead of linking to the web request.
+        expect(event_spans_for("enqueue.que")).to be_empty
+        expect(enqueued_tags).to eq(["user:42"]) if DependencyHelper.que1_present?
+        expect_job_arguments_untouched
+      end
+    end
+
+    # `bulk_enqueue` is Que 2 only. The whole batch shares one `job_options`, so
+    # it records a single producer event and the inner enqueues are pass-throughs.
     describe "#bulk_enqueue", :if => DependencyHelper.que2_present? do
       before do
         # Que's bulk path constantizes the job class by name, so it needs a real
@@ -276,34 +888,116 @@ if DependencyHelper.que_present?
         end
       end
 
-      it "records one bulk_enqueue event for the whole batch" do
-        transaction = http_request_transaction
-        set_current_transaction(transaction)
+      context "with an active transaction" do
+        it "records one producer event for the batch in agent mode", :agent_mode do
+          start_agent
+          transaction = http_request_transaction
+          set_current_transaction(transaction)
 
-        bulk_enqueue
+          bulk_enqueue
 
-        # One event for the whole batch, titled after the job -- the inner
-        # enqueues don't add their own.
-        bulk_events =
-          transaction.to_h["events"].select { |e| e["name"] == "bulk_enqueue.que" }
-        expect(bulk_events.size).to eq(1)
-        expect(bulk_events.first["title"]).to eq("bulk enqueue MyQueJob jobs")
-        event_names = transaction.to_h["events"].map { |event| event["name"] }
-        expect(event_names).to_not include("enqueue.que")
-        expect(enqueued_tags).to eq(["user:42"])
+          # One event for the whole batch, titled after the job -- the inner
+          # enqueues don't add their own.
+          bulk_events =
+            transaction.to_h["events"].select { |e| e["name"] == "bulk_enqueue.que" }
+          expect(bulk_events.size).to eq(1)
+          expect(bulk_events.first["title"]).to eq("bulk enqueue MyQueJob jobs")
+          event_names = transaction.to_h["events"].map { |event| event["name"] }
+          expect(event_names).to_not include("enqueue.que")
+          expect(enqueued_tags).to eq(["user:42"])
+        end
+
+        it "injects the batch's context once in collector mode", :collector_mode do
+          start_collector_agent
+          transaction = http_request_transaction
+          set_current_transaction(transaction)
+
+          bulk_enqueue
+          Appsignal::Transaction.complete_current!
+
+          producers = event_spans_for("bulk_enqueue.que")
+          expect(producers.size).to eq(1)
+          producer = producers.first
+          expect(producer.name).to eq("bulk_enqueue.que (bulk enqueue MyQueJob jobs)")
+          expect(producer.kind).to eq(:producer)
+          expect(producer.attributes["messaging.system"]).to eq("que")
+          expect(producer.attributes["messaging.operation.name"]).to eq("enqueue")
+          expect(producer.attributes["messaging.operation.type"]).to eq("send")
+          # As with a single enqueue, a batch that does not name a queue gets
+          # Que's default, which this integration cannot see.
+          expect(producer.attributes).to_not have_key("messaging.destination.name")
+          expect(producer.parent_span_id).to eq(root_span.span_id)
+
+          # Every job in the batch carries the one producer span's context, plus
+          # the tag marking it as one of a batch so the worker only links back.
+          expect(enqueued_tags).to include("user:42")
+          expect(enqueued_tags)
+            .to include("traceparent:00-#{producer.hex_trace_id}-#{producer.hex_span_id}-01")
+          expect(enqueued_tags)
+            .to include(Appsignal::Integrations::QueTraceContext::BULK_TAG)
+        end
+
+        it "skips propagation rather than break the enqueue when tags are full",
+          :collector_mode do
+          start_collector_agent
+          set_current_transaction(http_request_transaction)
+
+          full = %w[t1 t2 t3 t4 t5]
+          expect { bulk_enqueue(:tags => full) }.to_not raise_error
+          Appsignal::Transaction.complete_current!
+
+          expect(enqueued_tags).to eq(full)
+        end
+
+        it "skips propagation when only the trace context would fit",
+          :collector_mode do
+          start_collector_agent
+          set_current_transaction(http_request_transaction)
+
+          # There is room for the trace context but not for the bulk tag as well.
+          # Propagating without that tag would make the worker parent every job in
+          # the batch to the one producer span, so nothing is propagated at all.
+          tags = %w[t1 t2 t3 t4]
+          bulk_enqueue(:tags => tags)
+          Appsignal::Transaction.complete_current!
+
+          expect(enqueued_tags).to eq(tags)
+        end
       end
 
       context "when job enqueue events are suppressed" do
         # As happens under Active Job, which records the enqueue itself.
-        it "passes through without recording the enqueue" do
+        def bulk_enqueue_suppressed(transaction)
+          transaction.suppress_job_enqueue_events { bulk_enqueue }
+        end
+
+        it "in agent mode", :agent_mode do
+          start_agent
           transaction = http_request_transaction
           set_current_transaction(transaction)
 
-          transaction.suppress_job_enqueue_events { bulk_enqueue }
+          bulk_enqueue_suppressed(transaction)
 
           # The outer integration records the enqueue, so this one doesn't.
           event_names = transaction.to_h["events"].map { |event| event["name"] }
           expect(event_names).to_not include("bulk_enqueue.que")
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          transaction = http_request_transaction
+          set_current_transaction(transaction)
+
+          bulk_enqueue_suppressed(transaction)
+          Appsignal::Transaction.complete_current!
+
+          # No producer span for the suppressed batch...
+          expect(event_spans_for("bulk_enqueue.que")).to be_empty
+          # ...but the trace context is still injected so the jobs link back, and
+          # the batch is still marked so they link instead of parenting.
+          expect(enqueued_tags).to include(a_string_starting_with("traceparent:"))
+          expect(enqueued_tags)
+            .to include(Appsignal::Integrations::QueTraceContext::BULK_TAG)
         end
       end
     end

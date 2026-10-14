@@ -38,6 +38,15 @@ module Appsignal
       end
 
       # @api private
+      def self.complete_transaction(transaction)
+        safe_execution("Appsignal::Rack::EventHandler#complete_transaction") do
+          transaction.complete
+        end
+      ensure
+        Appsignal::Transaction.clear_current_transaction!
+      end
+
+      # @api private
       attr_reader :id
       attr_writer :using_appsignal_event_middleware
 
@@ -63,8 +72,12 @@ module Appsignal
           request.env[APPSIGNAL_EVENT_HANDLER_ID] ||= id
           return unless request_handler?(request.env[APPSIGNAL_EVENT_HANDLER_ID])
 
-          transaction = Appsignal::Transaction.create(Appsignal::Transaction::HTTP_REQUEST)
-          transaction.start_event
+          transaction = Appsignal::Transaction.create(
+            Appsignal::Transaction::HTTP_REQUEST,
+            :opentelemetry_context => Appsignal::OpenTelemetry.extract_rack_context(request.env),
+            :opentelemetry_scope => ["appsignal-ruby/rack", Appsignal::VERSION]
+          )
+          # Register cleanup before request instrumentation can raise.
           request.env[APPSIGNAL_TRANSACTION] = transaction
 
           request.env[RACK_AFTER_REPLY] ||= []
@@ -87,9 +100,32 @@ module Appsignal
             # just a fallback if that doesn't get called.
             #
             # One such scenario is when a Puma "lowlevel_error" occurs.
-            transaction.complete
-            Appsignal::Transaction.clear_current_transaction!
+            Appsignal::Rack::EventHandler.complete_transaction(transaction)
           end
+
+          # Describes the transaction's span as an incoming HTTP request.
+          # Together with the SERVER span kind the transaction already carries,
+          # this is what the trace timeline reads to recognize a web request.
+          #
+          # Set before the event below starts, because attributes go on
+          # whichever span is open and these belong on the transaction's own
+          # span. That event stays open until the response finishes, so there is
+          # no later point in the request at which these could be set.
+          transaction.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::HttpServerRequest.attributes_for(
+              :method => Appsignal::Rack::Utils.request_method_from(request),
+              :path => Appsignal::Rack::Utils.request_value_from(request, :path),
+              :scheme => Appsignal::Rack::Utils.request_value_from(request, :scheme),
+              :query => Appsignal::Rack::Utils.request_value_from(request, :query_string),
+              :host => Appsignal::Rack::Utils.request_value_from(request, :hostname),
+              :port => Appsignal::Rack::Utils.request_value_from(request, :port),
+              :protocol =>
+                Appsignal::Rack::Utils.request_env_value_from(request, "SERVER_PROTOCOL")
+            )
+          )
+          transaction.start_event(
+            :opentelemetry_scope => ["appsignal-ruby/rack", Appsignal::VERSION]
+          )
         end
       end
 
@@ -118,13 +154,27 @@ module Appsignal
 
         self.class.safe_execution("Appsignal::Rack::EventHandler#on_finish") do
           transaction.finish_event("process_request.rack", "callback: on_finish", "")
-          transaction.add_params_if_nil { request.params }
-          transaction.add_headers_if_nil { request.env }
+          transaction.add_request_payload_if_nil { request.params }
+          headers, environment =
+            Appsignal::Utils::RequestHeaders.split_lazily { request.env }
+          transaction.add_request_headers_if_nil(&headers)
+          transaction.add_request_environment_if_nil(&environment)
           transaction.add_session_data_if_nil do
             request.session if request.respond_to?(:session)
           end
           queue_start = Appsignal::Rack::Utils.queue_start_from(request.env)
           transaction.set_queue_start(queue_start) if queue_start
+          # Describes the response on the transaction's span, which the semantic
+          # conventions ask for whenever a response was sent. It can be set here
+          # because the `process_request.rack` event was finished above, which
+          # leaves the transaction's own span as the one attributes go on.
+          #
+          # Only a response the app actually produced counts. The 500 below
+          # stands in for a status that was never sent, so it is reported as a
+          # tag and a metric but not as this attribute.
+          transaction.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::HttpResponse.attributes_for(response&.status)
+          )
           response_status =
             if response
               response.status
@@ -133,19 +183,22 @@ module Appsignal
             end
           if response_status
             transaction.add_tags(:response_status => response_status)
-            Appsignal.increment_counter(
-              :response_status,
-              1,
+            tags = {
               :status => response_status,
               :namespace => format_namespace(transaction.namespace)
-            )
+            }
+            Appsignal.increment_counter(:response_status, 1, **tags)
+            Appsignal::OpenTelemetry.if_started do
+              Appsignal.increment_counter(
+                :response_status, 1, **tags, :service => Appsignal.config[:service_name]
+              )
+            end
           end
         end
 
         # Make sure the current transaction is always closed when the request
         # is finished
-        transaction.complete
-        Appsignal::Transaction.clear_current_transaction!
+        self.class.complete_transaction(transaction)
       end
 
       private

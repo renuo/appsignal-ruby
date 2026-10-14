@@ -6,6 +6,30 @@ module Appsignal
     class ActiveJobHook < Appsignal::Hooks::Hook
       register :active_job
 
+      # This integration records the enqueue itself, as a producer event that
+      # also injects trace context, and Active Job's own `enqueue.active_job`
+      # notification fires nested inside it. Claim the event so that the
+      # generic notification paths leave it alone.
+      #
+      # Claimed here, when this file is required, rather than in `install`.
+      # `install` only runs when Active Job instrumentation is turned on, but
+      # a customer who turns it off does not want to see the native
+      # notification reported instead. This call does not touch any
+      # `ActiveJob` constant, so it is safe to run even when the library is
+      # not present.
+      Appsignal::EventFormatter.register(
+        "enqueue.active_job",
+        Appsignal::EventFormatter::RecordedElsewhere
+      )
+
+      # Claimed for the same reason as the single enqueue above: this integration
+      # records the batch itself, as one producer event, and Active Job's own
+      # `enqueue_all.active_job` notification fires nested inside it.
+      Appsignal::EventFormatter.register(
+        "enqueue_all.active_job",
+        Appsignal::EventFormatter::RecordedElsewhere
+      )
+
       def self.version_7_1_or_higher?
         @version_7_1_or_higher ||=
           if dependencies_present?
@@ -21,16 +45,99 @@ module Appsignal
         defined?(::ActiveJob)
       end
 
+      # The parameters of the Active Job method this hook wraps to record a
+      # bulk enqueue. The wrapper reads the array of jobs out of the second
+      # one, so it is only safe to wrap a method that still takes these.
+      EXPECTED_INSTRUMENT_ENQUEUE_ALL_PARAMETERS = [
+        [:req, :queue_adapter],
+        [:req, :jobs]
+      ].freeze
+
+      # Whether Active Job records a bulk enqueue through a method at all. It
+      # only does so from version 7.1 on. Checking for the method, rather than
+      # for the version, keeps us from wrapping one on a version that has no
+      # bulk enqueue path to instrument.
+      def self.instrument_enqueue_all_defined?
+        ::ActiveJob.singleton_class.private_method_defined?(:instrument_enqueue_all)
+      end
+
+      # Whether that method still takes the arguments the wrapper reads.
+      #
+      # The method is private, so a later version of Active Job can change
+      # what it takes. Wrapping one that takes something else raises an
+      # ArgumentError inside every `ActiveJob.perform_all_later` call an
+      # application makes, which breaks enqueuing and not just its
+      # instrumentation. Refusing to wrap it is therefore the safe direction,
+      # whatever the refusal costs us.
+      def self.instrument_enqueue_all_parameters_match?
+        instrument_enqueue_all_parameters == EXPECTED_INSTRUMENT_ENQUEUE_ALL_PARAMETERS
+      end
+
+      # Active Job's own definition of the method, looked up past the wrapper
+      # this hook prepends. Installing twice would otherwise find that wrapper
+      # rather than the method it wraps, and so check it against itself. Only
+      # the wrapper is skipped, so a version of Active Job that defines the
+      # method somewhere else is still found.
+      def self.instrument_enqueue_all_method
+        method = ::ActiveJob.singleton_class.instance_method(:instrument_enqueue_all)
+        method = method.super_method while method&.owner == ActiveJobBulkEnqueueInstrumentation
+        method
+      end
+
+      def self.instrument_enqueue_all_parameters
+        instrument_enqueue_all_method&.parameters
+      end
+
+      # Names both sides of the mismatch, so a log line is enough to tell what
+      # Active Job changed and what the wrapper was written against.
+      def self.instrument_enqueue_all_mismatch_message
+        "Not instrumenting Active Job bulk enqueues: " \
+          "`ActiveJob.instrument_enqueue_all` takes " \
+          "#{instrument_enqueue_all_parameters.inspect} in this version of " \
+          "Active Job, where AppSignal expects " \
+          "#{EXPECTED_INSTRUMENT_ENQUEUE_ALL_PARAMETERS.inspect}."
+      end
+
       def dependencies_present?
-        self.class.dependencies_present?
+        self.class.dependencies_present? && Appsignal.config &&
+          Appsignal.config[:instrument_active_job]
       end
 
       def install
         ActiveSupport.on_load(:active_job) do
           ::ActiveJob::Base
             .extend ::Appsignal::Hooks::ActiveJobHook::ActiveJobClassInstrumentation
+          # Carry W3C trace context across the enqueue/perform boundary in
+          # collector mode (no-ops otherwise). The patches are cheap and
+          # mode-gated inside their method bodies, so install them unconditionally.
           ::ActiveJob::Base
-            .prepend ::Appsignal::Hooks::ActiveJobHook::ActiveJobEnqueueInstrumentation
+            .prepend ::Appsignal::Hooks::ActiveJobHook::ActiveJobTraceContext
+
+          # Wrap the method Active Job records a bulk enqueue through, but only
+          # when it is still the method the wrapper knows how to read. When it
+          # is not, the batch goes unrecorded: the claim above stands, because
+          # a worse event is not worth reporting in place of the one we set out
+          # to report.
+          if !Appsignal::Hooks::ActiveJobHook.instrument_enqueue_all_defined?
+            # Nothing to instrument on a version with no bulk enqueue path, so
+            # there is nothing to report either.
+            Appsignal.internal_logger.debug(
+              "Not instrumenting Active Job bulk enqueues: this version of " \
+                "Active Job does not record them through " \
+                "`ActiveJob.instrument_enqueue_all`."
+            )
+          elsif !Appsignal::Hooks::ActiveJobHook.instrument_enqueue_all_parameters_match?
+            # A bulk enqueue path exists, but not one that can be wrapped
+            # without breaking `ActiveJob.perform_all_later` for the whole
+            # application. Report that at a level someone will see, because a
+            # batch that used to be recorded no longer is.
+            Appsignal.internal_logger.warn(
+              Appsignal::Hooks::ActiveJobHook.instrument_enqueue_all_mismatch_message
+            )
+          else
+            ::ActiveJob.singleton_class
+              .prepend ::Appsignal::Hooks::ActiveJobHook::ActiveJobBulkEnqueueInstrumentation
+          end
 
           next unless Appsignal::Hooks::ActiveJobHook.version_7_1_or_higher?
 
@@ -43,30 +150,103 @@ module Appsignal
         end
       end
 
-      # Records an `enqueue.active_job` event when a job is enqueued, so the
-      # enqueue shows up on the active transaction's timeline (e.g. when
-      # enqueuing from within a web request or another job).
+      # Records an `enqueue_all.active_job` event when a batch of jobs is
+      # enqueued with `ActiveJob.perform_all_later`, so the batch shows up on the
+      # active transaction's timeline as one event, and as one producer span in
+      # collector mode.
       #
-      # Wrapping `enqueue` ourselves -- rather than relying on Rails' native
-      # `enqueue.active_job` notification, which the AppSignal notifications
-      # path now suppresses -- gives us a single event we own. Like all
-      # AppSignal events, this only records when there's an active transaction;
-      # an enqueue with no transaction is a transparent pass-through.
+      # This wraps `instrument_enqueue_all` rather than `perform_all_later`, for
+      # two reasons. It is the method that records the batch, so it is called
+      # once for each queue adapter the batch spans, which is the same event
+      # count as the native notification it replaces. And it runs inside
+      # `perform_all_later`, after Active Job has split off the jobs it defers
+      # until the database transaction commits, so each of those halves is
+      # recorded when it is really enqueued.
       #
       # @!visibility private
-      module ActiveJobEnqueueInstrumentation
-        def enqueue(*, **)
-          Appsignal.instrument("enqueue.active_job", "enqueue #{self.class.name} job") do
-            # Active Job enqueues through an adapter (Sidekiq, Resque, ...) that
-            # has its own enqueue instrumentation. Suppress it so the enqueue is
-            # recorded once, as this event, rather than as nested Active Job +
-            # adapter events.
+      module ActiveJobBulkEnqueueInstrumentation
+        private
+
+        def instrument_enqueue_all(_queue_adapter, jobs)
+          # When enqueue instrumentation is disabled, record nothing, the same as
+          # the single-job path.
+          return super if Appsignal.config && !Appsignal.config[:enable_job_enqueue_instrumentation]
+
+          # Another enqueue integration is already recording this enqueue, so
+          # don't record it a second time.
+          if Appsignal::Transaction.current? &&
+              Appsignal::Transaction.current.job_enqueue_events_suppressed?
+            return super
+          end
+
+          Appsignal.instrument(
+            "enqueue_all.active_job",
+            bulk_enqueue_title(jobs),
+            :opentelemetry_kind => :producer,
+            :opentelemetry_scope => ["appsignal-ruby/active_job", Appsignal::VERSION]
+          ) do
+            Appsignal::Transaction.current.add_opentelemetry_attributes(
+              Appsignal::OpenTelemetry::Messaging.enqueue_attributes(
+                "active_job",
+                :destination => bulk_enqueue_destination(jobs),
+                :batch_size => jobs.size
+              )
+            )
+            inject_context_into(jobs)
+            # A bulk enqueue does not go through `ActiveJob::Base#enqueue`, so
+            # nothing has suppressed the adapter (Sidekiq, Resque, ...) yet, and
+            # its own enqueue instrumentation would record an event for every job
+            # in the batch. Suppress it so the batch is recorded once, as this
+            # event.
             if Appsignal::Transaction.current?
               Appsignal::Transaction.current.suppress_job_enqueue_events { super }
             else
               super
             end
           end
+        end
+
+        # Writes this producer span's context onto every job in the batch, and
+        # marks each one as part of a batch, so the jobs that perform later link
+        # back to this span. A bulk enqueue never goes through
+        # `ActiveJob::Base#enqueue`, so the injection the single-job path does
+        # never runs for these jobs. The adapter serializes each job after this,
+        # and the `serialize` patch carries the headers to the wire from there.
+        # A no-op outside collector mode.
+        def inject_context_into(jobs)
+          jobs.each do |job|
+            headers = job.__otel_headers
+            Appsignal::OpenTelemetry.inject_context(headers)
+            Appsignal::OpenTelemetry.mark_active_job_batch(headers)
+          end
+        end
+
+        # The batch's job class, when every job in it has the same one. Active
+        # Job groups the jobs it enqueues by queue adapter rather than by class,
+        # so a batch can mix classes, and then there is no one class to name.
+        def bulk_enqueue_title(jobs)
+          job_class = shared_across(jobs) { |job| job.class.name }
+          return "bulk enqueue jobs" unless job_class
+
+          "bulk enqueue #{job_class} jobs"
+        end
+
+        # The queue the batch went to, when every job in it is on the same one.
+        # Grouping is by queue adapter and not by queue, so a batch can span
+        # queues, and then there is no one queue to name as the destination.
+        def bulk_enqueue_destination(jobs)
+          shared_across(jobs, &:queue_name)
+        end
+
+        # The one value every job in the batch shares, or nil when they differ
+        # or the batch is empty. Stops at the first job that disagrees, because
+        # a batch is as large as the caller made it and a single mismatch is
+        # enough to know.
+        def shared_across(jobs)
+          return if jobs.empty?
+
+          first = yield(jobs.first)
+          jobs.all? { |job| yield(job) == first } ? first : nil
         end
       end
 
@@ -91,12 +271,40 @@ module Appsignal
               # We don't have a separate integration for this QueueAdapter like
               # we do for Sidekiq.
               #
+              # Read the trace context off the job so the transaction links back
+              # to the enqueuer (no-op outside collector mode). Only here, in the
+              # standalone branch: when a wrapper integration (e.g. Sidekiq)
+              # created the transaction, it already extracted, so we must not
+              # extract a second time.
+              #
               # Prefer job_id from provider, instead of ActiveJob's internal ID.
-              Appsignal::Transaction.create(Appsignal::Transaction::BACKGROUND_JOB)
+              Appsignal::Transaction.create(
+                Appsignal::Transaction::BACKGROUND_JOB,
+                :opentelemetry_context => Appsignal::OpenTelemetry.extract_job_context(job),
+                :opentelemetry_scope => ["appsignal-ruby/active_job", Appsignal::VERSION],
+                :opentelemetry_kind => :consumer,
+                :opentelemetry_relationship =>
+                  Appsignal::OpenTelemetry.active_job_relationship(job)
+              )
             end
 
+          unless has_wrapper_transaction
+            # Describes this span as a job being performed. The messaging
+            # system is what the trace timeline reads to recognize background
+            # job work, and `active_job` is the value OpenTelemetry's own Active
+            # Job instrumentation uses.
+            #
+            # Only set when this hook created the transaction. When an adapter
+            # integration created it, that adapter already named itself, and its
+            # answer is the more specific one.
+            transaction.add_opentelemetry_attributes(
+              Appsignal::OpenTelemetry::Messaging
+                .perform_attributes("active_job", :destination => job["queue_name"])
+            )
+          end
+
           begin
-            transaction.add_params_if_nil(job["arguments"])
+            transaction.add_function_parameters_if_nil(job["arguments"])
 
             transaction_tags = ActiveJobHelpers.transaction_tags_for(job)
             transaction.add_tags(transaction_tags)
@@ -150,6 +358,85 @@ module Appsignal
 
           transaction.set_error(exception)
         end
+      end
+
+      # Reads and writes W3C trace context on the ActiveJob enqueue/perform
+      # boundary, wire-compatible with OpenTelemetry's ActiveJob instrumentation.
+      # All of this no-ops outside collector mode.
+      #
+      # Context rides on the job under `__otel_headers`, the same carrier OTel
+      # uses. Stock `serialize`/`deserialize` only carry a fixed key set, so --
+      # like OTel -- we patch both plus an accessor to round-trip it. The on-wire
+      # value is run through ActiveJob's argument serializer (an array of
+      # `[key, value]` pairs), matching OTel byte-for-byte so an AppSignal- and an
+      # OTel-instrumented service read each other's jobs.
+      module ActiveJobTraceContext
+        # Inject on enqueue from inside a producer event, so the job carries this
+        # transaction's context and the perform later links back. Mirrors the
+        # Sidekiq client middleware: an AppSignal event (a producer span in
+        # collector mode), not a direct SDK span. `Appsignal.instrument` is a
+        # transparent pass-through when there's no active transaction, and
+        # `inject_context` no-ops outside collector mode.
+        def enqueue(*, **)
+          # When enqueue instrumentation is disabled, drop the trace context
+          # along with the event. Without an enqueue event there is no producer
+          # span, so the context we would write is that of whatever span is
+          # current, such as the surrounding web request. The job that performs
+          # later would then link back to a span that is not a producer.
+          return super if Appsignal.config && !Appsignal.config[:enable_job_enqueue_instrumentation]
+
+          # Another enqueue integration is already recording this enqueue, so
+          # don't record it a second time.
+          if Appsignal::Transaction.current? &&
+              Appsignal::Transaction.current.job_enqueue_events_suppressed?
+            return super
+          end
+
+          Appsignal.instrument(
+            "enqueue.active_job",
+            "enqueue #{self.class.name} job",
+            :opentelemetry_kind => :producer,
+            :opentelemetry_scope => ["appsignal-ruby/active_job", Appsignal::VERSION]
+          ) do
+            Appsignal::Transaction.current.add_opentelemetry_attributes(
+              Appsignal::OpenTelemetry::Messaging
+                .enqueue_attributes("active_job", :destination => queue_name)
+            )
+            Appsignal::OpenTelemetry.inject_context(__otel_headers)
+            # Active Job enqueues through an adapter (Sidekiq, Resque, ...) that
+            # has its own enqueue instrumentation. Suppress it so the enqueue is
+            # recorded once, as this event, rather than as nested Active Job +
+            # adapter events.
+            if Appsignal::Transaction.current?
+              Appsignal::Transaction.current.suppress_job_enqueue_events { super }
+            else
+              super
+            end
+          end
+        end
+
+        def serialize
+          super.tap do |data|
+            Appsignal::OpenTelemetry.if_started do
+              next if __otel_headers.empty?
+
+              data["__otel_headers"] = ::ActiveJob::Arguments.serialize(__otel_headers)
+            end
+          end
+        end
+
+        def deserialize(job_data)
+          super
+          serialized = job_data["__otel_headers"]
+          @__otel_headers =
+            serialized ? ::ActiveJob::Arguments.deserialize(serialized).to_h : {}
+        end
+
+        def __otel_headers
+          @__otel_headers ||= {}
+        end
+
+        attr_writer :__otel_headers
       end
 
       module ActiveJobHelpers

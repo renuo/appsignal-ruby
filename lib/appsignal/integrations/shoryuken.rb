@@ -3,19 +3,121 @@
 module Appsignal
   module Integrations
     # @!visibility private
+    #
+    # Reads and writes W3C trace context the way OpenTelemetry's aws-sdk
+    # instrumentation does: as SQS message attributes, using the global
+    # propagator. Staying wire-equivalent means that if both AppSignal and
+    # OpenTelemetry's aws-sdk instrumentation are active, one simply shadows the
+    # other rather than corrupting the carrier. Collector mode only.
+    module ShoryukenTraceContext
+      module_function
+
+      # SQS allows at most 10 message attributes per message. Mirror
+      # OpenTelemetry and skip propagation rather than risk the enqueue failing
+      # when the user already fills the slots.
+      MAX_MESSAGE_ATTRIBUTES = 10
+
+      # Writes each trace header as an SQS message attribute, matching the shape
+      # OpenTelemetry's aws-sdk instrumentation injects on send.
+      module MessageAttributeSetter
+        def self.set(carrier, key, value)
+          return if carrier.length >= MAX_MESSAGE_ATTRIBUTES
+
+          carrier[key] = { :string_value => value, :data_type => "String" }
+        end
+      end
+
+      # Reads a trace header back out of a message attribute. Works both for the
+      # plain hash we inject and for the `Aws::SQS::Types::MessageAttributeValue`
+      # struct delivered on receive, since both respond to `[:string_value]` /
+      # `[:data_type]`.
+      module MessageAttributeGetter
+        def self.get(carrier, key)
+          attribute = carrier[key]
+          attribute[:string_value] if attribute && attribute[:data_type] == "String"
+        end
+      end
+
+      # Read the incoming context off a message's SQS message attributes so the
+      # transaction links back to the enqueuer. Returns an
+      # `OpenTelemetry::Context`, or `nil` outside collector mode.
+      def extract(message_attributes)
+        Appsignal::OpenTelemetry.if_started do
+          ::OpenTelemetry.propagation.extract(
+            message_attributes || {},
+            :getter => MessageAttributeGetter
+          )
+        end
+      end
+
+      # Write the current trace context into the outgoing send `options`.
+      # Injects into a scratch carrier first and merges it into the message
+      # attributes only when something was written, so an enqueue with no active
+      # span (no transaction, or outside collector mode) leaves the options
+      # untouched -- a transparent pass-through.
+      def inject(options)
+        Appsignal::OpenTelemetry.if_started do
+          carrier = {}
+          ::OpenTelemetry.propagation.inject(carrier, :setter => MessageAttributeSetter)
+          next if carrier.empty?
+
+          options[:message_attributes] = (options[:message_attributes] || {}).merge(carrier)
+        end
+      end
+    end
+
+    # @!visibility private
     class ShoryukenMiddleware
       def call(worker_instance, queue, sqs_msg, body, &block)
-        transaction = Appsignal::Transaction.create(Appsignal::Transaction::BACKGROUND_JOB)
+        batch = sqs_msg.is_a?(Array)
+        # How many messages this call covers, which is only reported for a batch.
+        batch_size = sqs_msg.size if batch
 
-        Appsignal.instrument("perform_job.shoryuken", &block)
+        # Read the incoming trace context off the message so the transaction
+        # links back to the enqueuer. A batch carries messages from multiple
+        # traces with no single parent, so only single messages link back.
+        # No-op outside collector mode.
+        context = extract_context(sqs_msg, body) unless batch
+
+        transaction = Appsignal::Transaction.create(
+          Appsignal::Transaction::BACKGROUND_JOB,
+          :opentelemetry_context => context,
+          :opentelemetry_scope => ["appsignal-ruby/shoryuken", Appsignal::VERSION],
+          :opentelemetry_kind => :consumer,
+          # A message batch is a batch on the receiving side, and carries no
+          # context to relate to at all, so the body it reads here is the single
+          # message's job data or nothing.
+          :opentelemetry_relationship =>
+            Appsignal::OpenTelemetry.active_job_relationship(batch ? nil : body)
+        )
+        # Describes this span as a job being performed. The messaging system is
+        # what the trace timeline reads to recognize background job work.
+        # Shoryuken runs on Amazon SQS, so it takes the `aws_sqs` value the
+        # OpenTelemetry semantic conventions define for it.
+        transaction.add_opentelemetry_attributes(
+          Appsignal::OpenTelemetry::Messaging.perform_attributes(
+            "aws_sqs", :destination => queue, :batch_size => batch_size
+          )
+        )
+
+        Appsignal.instrument(
+          "perform_job.shoryuken",
+          :opentelemetry_scope => ["appsignal-ruby/shoryuken", Appsignal::VERSION]
+        ) do
+          Appsignal::Transaction.current.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::Messaging.perform_attributes(
+              "aws_sqs", :destination => queue, :batch_size => batch_size
+            )
+          )
+          block.call
+        end
       rescue Exception => error
         transaction.set_error(error)
         raise
       ensure
-        batch = sqs_msg.is_a?(Array)
         attributes = fetch_attributes(batch, sqs_msg)
         transaction.set_action_if_nil("#{worker_instance.class.name}#perform")
-        transaction.add_params_if_nil { fetch_args(batch, sqs_msg, body) }
+        transaction.add_function_parameters_if_nil { fetch_args(batch, sqs_msg, body) }
         transaction.add_tags(attributes)
         transaction.add_tags("queue" => queue)
         transaction.add_tags("batch" => true) if batch
@@ -28,6 +130,21 @@ module Appsignal
       end
 
       private
+
+      # The trace context to continue: the Active Job layer when this is an
+      # Active Job job, the message's own attributes otherwise. See `Appsignal::OpenTelemetry.extract_active_job_context`
+      # for why that layer wins.
+      # SQS allows ten message attributes per message, shared with whatever the
+      # user puts there.
+      #
+      # The Active Job adapter registers a worker that parses the message body as
+      # JSON, so an Active Job job's body arrives here as its serialized job
+      # data. Nothing checks that it is one: a body with no readable trace
+      # context in it reads as "nothing here" on its own.
+      def extract_context(sqs_msg, body)
+        Appsignal::OpenTelemetry.extract_active_job_context(body) ||
+          ShoryukenTraceContext.extract(sqs_msg.message_attributes)
+      end
 
       def fetch_attributes(batch, sqs_msg)
         if batch
@@ -73,7 +190,9 @@ module Appsignal
     end
 
     # Shoryuken client middleware that records an `enqueue.shoryuken` event so
-    # the enqueue shows up under the active transaction.
+    # the enqueue shows up under the active transaction (both modes), and in
+    # collector mode writes the current trace context onto the outgoing message
+    # so the job that later performs links back to it.
     #
     # Like all AppSignal events, this only records when there's an active
     # transaction (e.g. enqueuing from within a web request or another job). An
@@ -81,13 +200,36 @@ module Appsignal
     #
     # @!visibility private
     class ShoryukenClientMiddleware
-      def call(options, &block)
-        # Under Active Job the enqueue is already recorded as an
-        # `enqueue.active_job` event, so skip recording it again here.
-        return yield if Appsignal::Transaction.current? &&
-          Appsignal::Transaction.current.job_enqueue_events_suppressed?
+      def call(options)
+        # When enqueue instrumentation is disabled, drop the trace context along
+        # with the event. Without an enqueue event there is no producer span, so
+        # the context we would write is that of whatever span is current, such as
+        # the surrounding web request. The job that performs later would then
+        # link back to a span that is not a producer.
+        return yield if Appsignal.config && !Appsignal.config[:enable_job_enqueue_instrumentation]
 
-        Appsignal.instrument("enqueue.shoryuken", enqueue_title(options), &block)
+        # Under Active Job the enqueue is already recorded as an
+        # `enqueue.active_job` event, so skip recording it again here. The trace
+        # context is still injected so the performed job links back.
+        if Appsignal::Transaction.current? &&
+            Appsignal::Transaction.current.job_enqueue_events_suppressed?
+          ShoryukenTraceContext.inject(options)
+          return yield
+        end
+
+        Appsignal.instrument(
+          "enqueue.shoryuken",
+          enqueue_title(options),
+          :opentelemetry_kind => :producer,
+          :opentelemetry_scope => ["appsignal-ruby/shoryuken", Appsignal::VERSION]
+        ) do
+          Appsignal::Transaction.current.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::Messaging
+              .enqueue_attributes("aws_sqs", :destination => queue_name(options))
+          )
+          ShoryukenTraceContext.inject(options)
+          yield
+        end
       end
 
       private
@@ -99,8 +241,13 @@ module Appsignal
         worker_class = options.dig(:message_attributes, "shoryuken_class", :string_value)
         return "enqueue #{worker_class} job" if worker_class
 
-        queue = options[:queue_url].to_s.split("/").last
-        "enqueue on #{queue}"
+        "enqueue on #{queue_name(options)}"
+      end
+
+      # The queue a message is being sent to, which SQS identifies by a URL whose
+      # last segment is the queue's name.
+      def queue_name(options)
+        options[:queue_url].to_s.split("/").last
       end
     end
   end

@@ -1,0 +1,128 @@
+# frozen_string_literal: true
+
+module Appsignal
+  class Transaction
+    # @!visibility private
+    #
+    # The interface every transaction backend implements. `Appsignal::Backends
+    # .transaction` picks a concrete backend per mode -- ExtensionBackend in
+    # agent mode, OpenTelemetryBackend in collector mode. This base documents the
+    # contract; a backend that leaves a method unimplemented raises here.
+    class BaseBackend
+      # Instrumented events.
+      def start_event(opentelemetry_kind: nil, opentelemetry_scope: nil)
+        raise NotImplementedError
+      end
+
+      def finish_event(_name, _title, _body, _body_format)
+        raise NotImplementedError
+      end
+
+      def record_event( # rubocop:disable Metrics/ParameterLists
+        _name, _title, _body, _body_format, _duration,
+        opentelemetry_kind: nil, opentelemetry_scope: nil
+      )
+        raise NotImplementedError
+      end
+
+      # Transaction metadata.
+      def set_action(_action)
+        raise NotImplementedError
+      end
+
+      def set_namespace(_namespace)
+        raise NotImplementedError
+      end
+
+      def set_metadata(_key, _value)
+        raise NotImplementedError
+      end
+
+      def set_queue_start(_start)
+        raise NotImplementedError
+      end
+
+      # OpenTelemetry span attributes, set on whichever span the backend is
+      # currently recording. Only meaningful in collector mode; agent mode has
+      # no span to hang them on.
+      def set_attributes(_attributes)
+        raise NotImplementedError
+      end
+
+      # Maps each logical params channel (`:params`, `:request_payload`,
+      # `:function_parameters`) to the storage bucket it lands in. Channels that
+      # share a bucket merge into one `SampleData` object on the transaction;
+      # distinct buckets stay separate. The bucket name is also the sample-data
+      # key `set_sample_data` receives for that bucket, so it must be a key this
+      # backend's `set_sample_data` knows how to store.
+      def params_mapping
+        raise NotImplementedError
+      end
+
+      # Maps each params bucket to the configuration options that decide what
+      # it reports: `:filter`, naming the keys to filter out of it, and
+      # `:send`, deciding whether to report it at all.
+      def params_options
+        raise NotImplementedError
+      end
+
+      # Maps each logical header channel (`:request_headers`,
+      # `:request_environment`) to the storage bucket it lands in and the
+      # transform to apply to each key and value added on it, as
+      # `[bucket, transform]`. A `nil` transform leaves the value alone.
+      def headers_mapping
+        raise NotImplementedError
+      end
+
+      # Maps each header bucket to the configuration option that lists the
+      # keys to keep in it. An option holding `nil` keeps every key.
+      def headers_allowlist
+        raise NotImplementedError
+      end
+
+      # Sample data (params, session, tags, ...), breadcrumbs and errors.
+      def set_sample_data(_key, _data)
+        raise NotImplementedError
+      end
+
+      def add_breadcrumb(_breadcrumb)
+        raise NotImplementedError
+      end
+
+      def set_error(_class_name, _message, _backtrace, _causes, _root_cause_missing)
+        raise NotImplementedError
+      end
+
+      # Whether the backend can hold more than one error on a single
+      # transaction. When it can't (agent mode), the Transaction reports the
+      # extra errors as duplicate transactions instead.
+      def supports_multiple_errors?
+        raise NotImplementedError
+      end
+
+      # Lifecycle.
+      def finish
+        raise NotImplementedError
+      end
+
+      def complete
+        raise NotImplementedError
+      end
+
+      def discard
+        raise NotImplementedError
+      end
+
+      # Only used when `supports_multiple_errors?` is false (agent mode).
+      # Backends that support multiple errors never duplicate and leave this
+      # unimplemented.
+      def duplicate(_new_transaction_id)
+        raise NotImplementedError
+      end
+
+      def to_json # rubocop:disable Lint/ToJSON
+        raise NotImplementedError
+      end
+    end
+  end
+end

@@ -33,50 +33,192 @@ if DependencyHelper.dry_monitor_present?
 
   describe "Dry Monitor Integration" do
     let(:notifications) { Dry::Monitor::Notifications.new(:test) }
-    let(:transaction) { http_request_transaction }
-    before do
-      start_agent
-      set_current_transaction(transaction)
-    end
 
-    context "when is a dry-sql event" do
+    describe "a SQL event" do
       let(:event_id) { :sql }
       let(:payload) do
         {
-          :name => "postgres",
+          :name => :postgres,
           :query => "SELECT * FROM users"
         }
       end
 
-      it "creates an sql event" do
+      def perform
         notifications.instrument(event_id, payload)
+      end
+
+      it "in agent mode", :agent_mode do
+        start_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+        perform
         expect(transaction).to include_event(
           "body" => "SELECT * FROM users",
           "body_format" => Appsignal::EventFormatter::SQL_BODY_FORMAT,
           "count" => 1,
-          "name" => "query.postgres",
-          "title" => "query.postgres"
+          "name" => "query.rom",
+          "title" => ""
         )
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+        perform
+        Appsignal::Transaction.complete_current!
+
+        expect(event_spans.size).to eq(1)
+        span = event_spans.first
+        expect(span.name).to eq("query.rom")
+        expect(span.parent_span_id).to eq(root_span.span_id)
+        # ROM emits its queries as dry-monitor `sql` events; a query is an
+        # outgoing call, so it carries CLIENT kind.
+        expect(span.kind).to eq(:client)
+        attrs = span.attributes
+        expect(attrs["db.query.text"]).to eq("SELECT * FROM users")
+        # The payload's `name` is Sequel's database_type symbol for the
+        # database ROM is talking to, which the formatter maps to the real
+        # engine name rather than leaving it at the SQL sentinel.
+        expect(attrs["db.system.name"]).to eq("postgresql")
+        expect(event_category(span)).to eq("query.rom")
+        # ROM emits this event, so it is attributed to ROM rather than to the
+        # bus it arrived over.
+        expect(scope_of(span)).to eq(["appsignal-ruby/rom", Appsignal::VERSION])
+        expect(attrs).not_to have_key("appsignal.body")
       end
     end
 
-    context "when is an unregistered formatter event" do
-      let(:event_id) { :foo }
-      let(:payload) do
-        {
-          :name => "foo"
-        }
+    describe "an event whose formatter declares attributes" do
+      let(:event_id) { :attributed }
+      let(:payload) { { :name => "attributed" } }
+
+      # A minimal stand-in for a formatter that both formats an event's body
+      # and names OpenTelemetry attributes for it, such as ROM's SQL
+      # formatter does once it names a real `db.system.name`. This proves
+      # `instrument` calls through to `opentelemetry_attributes`, not only
+      # to `format`.
+      let(:formatter_class) do
+        Class.new(Appsignal::EventFormatter) do
+          def format(_payload)
+            ["attributed.dry", "body", Appsignal::EventFormatter::DEFAULT]
+          end
+
+          def opentelemetry_attributes(_payload)
+            { "db.system.name" => "postgresql" }
+          end
+        end
       end
 
-      it "creates a generic event" do
+      before { Appsignal::EventFormatter.register("attributed.dry", formatter_class) }
+
+      after { Appsignal::EventFormatter.unregister("attributed.dry", formatter_class) }
+
+      def perform
         notifications.instrument(event_id, payload)
+      end
+
+      it "puts the formatter's attributes on the event's own span", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+        perform
+        Appsignal::Transaction.complete_current!
+
+        expect(event_spans.size).to eq(1)
+        span = event_spans.first
+        expect(span.attributes["db.system.name"]).to eq("postgresql")
+      end
+    end
+
+    describe "an event that another integration records" do
+      let(:event_id) { :claimed }
+      let(:payload) { { :name => "claimed" } }
+
+      before do
+        Appsignal::EventFormatter.register(
+          "claimed.dry",
+          Appsignal::EventFormatter::RecordedElsewhere
+        )
+      end
+
+      after do
+        Appsignal::EventFormatter.unregister(
+          "claimed.dry",
+          Appsignal::EventFormatter::RecordedElsewhere
+        )
+      end
+
+      def perform
+        notifications.instrument(event_id, payload) { "block value" }
+      end
+
+      it "in agent mode", :agent_mode do
+        start_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        expect(perform).to eq("block value")
+
+        expect(transaction.to_h["events"]).to be_empty
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+
+        expect(perform).to eq("block value")
+
+        Appsignal::Transaction.complete_current!
+
+        expect(event_spans).to be_empty
+      end
+    end
+
+    describe "an unregistered formatter event" do
+      let(:event_id) { :foo }
+      let(:payload) { { :name => "foo" } }
+
+      def perform
+        notifications.instrument(event_id, payload)
+      end
+
+      it "in agent mode", :agent_mode do
+        start_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+        perform
         expect(transaction).to include_event(
           "body" => "",
           "body_format" => Appsignal::EventFormatter::DEFAULT,
           "count" => 1,
-          "name" => "foo",
+          "name" => "foo.dry",
           "title" => ""
         )
+      end
+
+      it "in collector mode", :collector_mode do
+        start_collector_agent
+        transaction = http_request_transaction
+        set_current_transaction(transaction)
+        perform
+        Appsignal::Transaction.complete_current!
+
+        expect(event_spans.size).to eq(1)
+        span = event_spans.first
+        expect(span.name).to eq("foo.dry")
+        expect(span.parent_span_id).to eq(root_span.span_id)
+        # A non-SQL dry event is not an outgoing call, so it keeps the default kind.
+        expect(span.kind).to eq(:internal)
+        # No formatter names a library for this event, so it is attributed to
+        # the bus it arrived over.
+        expect(scope_of(span)).to eq(["appsignal-ruby/dry_monitor", Appsignal::VERSION])
+        attrs = span.attributes
+        expect(event_category(span)).to eq("foo.dry")
+        expect(attrs).not_to have_key("appsignal.body")
+        expect(attrs).not_to have_key("db.query.text")
+        expect(attrs).not_to have_key("db.system.name")
       end
     end
   end

@@ -29,6 +29,9 @@ end
 Dir[File.join(APPSIGNAL_SPEC_DIR, "support/shared_examples", "*.rb")].sort.each do |f|
   require f
 end
+Dir[File.join(APPSIGNAL_SPEC_DIR, "support/shared_contexts", "*.rb")].sort.each do |f|
+  require f
+end
 if DependencyHelper.rails_present?
   require File.join(ConfigHelpers.rails_project_fixture_path, "config/application.rb")
 end
@@ -78,7 +81,11 @@ RSpec.configure do |config|
   config.exclude_pattern = "spec/integration/diagnose/**/*_spec.rb"
   config.filter_run_excluding(
     :extension_installation_failure => true,
-    :jruby => !DependencyHelper.running_jruby?
+    :jruby => !DependencyHelper.running_jruby?,
+    # The OpenTelemetry gems are optional. When they're not installed (e.g. on
+    # Ruby 2.7, or any non-`-collector` gemfile), skip every collector-mode
+    # example rather than crashing on missing constants.
+    :collector_mode => !DependencyHelper.opentelemetry_present?
   )
   config.mock_with :rspec do |mocks|
     mocks.syntax = :expect
@@ -92,7 +99,30 @@ RSpec.configure do |config|
   end
 
   config.before :suite do
-    WebMock.disable_net_connect!
+    # The mock servers are only needed by collector-mode specs, which only run
+    # when the OpenTelemetry gems are installed. Always disable real network
+    # connections; when those specs run, relax the rule just enough to reach
+    # the servers bound by `OTLPCollectorServer` and `HTTPProxyServer`.
+    if DependencyHelper.opentelemetry_present?
+      # Boot first: each server binds an OS-assigned port, so its address is
+      # only known afterwards.
+      OTLPCollectorServer.boot!
+      HTTPProxyServer.boot!
+      WebMock.disable_net_connect!(
+        :allow => [
+          "127.0.0.1:#{OTLPCollectorServer.port}",
+          "127.0.0.1:#{HTTPProxyServer.port}"
+        ]
+      )
+    else
+      WebMock.disable_net_connect!
+    end
+  end
+
+  config.after do
+    OTLPCollectorServer.clear if defined?(OTLPCollectorServer)
+    HTTPProxyServer.clear if defined?(HTTPProxyServer)
+    Appsignal::OpenTelemetry.reset!
   end
 
   config.before :context do
@@ -125,6 +155,12 @@ RSpec.configure do |config|
     # keys.
     env_keys << "_APPSIGNAL_DIAGNOSE"
     env_keys << "_TEST_APPSIGNAL_EXTENSION_FAILURE"
+    # The config detects the revision from these variables. Clear them so a
+    # revision set where the specs run does not change what the config detects.
+    # DYNO and DOKKU_ROOT are left alone, because specs set those in `around`
+    # hooks, which run before this one.
+    env_keys << "APP_REVISION"
+    env_keys.concat(Appsignal::Config::PLATFORM_REVISION_ENV_VARS)
     env_keys.each do |key|
       # First set the ENV var to an empty string and then delete the key from
       # the env. We set the env var to an empty string first as JRuby doesn't

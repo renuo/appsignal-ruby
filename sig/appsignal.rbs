@@ -259,6 +259,14 @@ module Appsignal
   # 
   # _@param_ `action` — The action name for the transaction. The action name is required to be set for the transaction to be reported. The argument can be set to `nil` or `:set_later` if the action is set within the block with {#set_action}. This will not update the active transaction's action if {.monitor} is called when another transaction is already active.
   # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+  # 
+  # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+  # 
+  # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+  # 
   # _@return_ — The value of the given block is returned.
   # Returns `nil` if there already is a transaction active and no block
   # was given.
@@ -349,7 +357,14 @@ module Appsignal
   # ```
   # 
   # _@see_ `https://docs.appsignal.com/ruby/instrumentation/background-jobs.html` — Monitor guide
-  def self.monitor: (action: (String | Symbol | NilClass), ?namespace: (String | Symbol)?) ?{ () -> Object } -> Object?
+  def self.monitor: (
+                      action: (String | Symbol | NilClass),
+                      ?namespace: (String | Symbol)?,
+                      ?opentelemetry_context: untyped,
+                      ?opentelemetry_scope: [String, String]?,
+                      ?opentelemetry_kind: Symbol?,
+                      ?opentelemetry_relationship: Symbol?
+                    ) ?{ () -> Object } -> Object?
 
   # Instrument a block of code and stop AppSignal.
   # 
@@ -363,10 +378,25 @@ module Appsignal
   # 
   # _@param_ `action` — The action name for the transaction. The action name is required to be set for the transaction to be reported. The argument can be set to `nil` or `:set_later` if the action is set within the block with {#set_action}. This will not update the active transaction's action if {.monitor} is called when another transaction is already active.
   # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+  # 
+  # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+  # 
+  # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+  # 
   # _@return_ — The value of the given block is returned.
   # 
   # _@see_ `monitor`
-  def self.monitor_and_stop: (action: (String | Symbol | NilClass), ?namespace: (String | Symbol)?) ?{ () -> Object } -> Object?
+  def self.monitor_and_stop: (
+                               action: (String | Symbol | NilClass),
+                               ?namespace: (String | Symbol)?,
+                               ?opentelemetry_context: untyped,
+                               ?opentelemetry_scope: [String, String]?,
+                               ?opentelemetry_kind: Symbol?,
+                               ?opentelemetry_relationship: Symbol?
+                             ) ?{ () -> Object } -> Object?
 
   # Send an error to AppSignal regardless of the context.
   # 
@@ -384,6 +414,14 @@ module Appsignal
   # "error" is not a class extended from Ruby's Exception class.
   # 
   # _@param_ `error` — The error to send to AppSignal.
+  # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+  # 
+  # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+  # 
+  # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
   # 
   # Send an exception
   # ```ruby
@@ -405,7 +443,13 @@ module Appsignal
   # ```
   # 
   # _@see_ `https://docs.appsignal.com/ruby/instrumentation/exception-handling.html` — Exception handling guide
-  def self.send_error: (Exception error) ?{ (Transaction transaction) -> void } -> void
+  def self.send_error: (
+                         Exception error,
+                         ?opentelemetry_context: untyped,
+                         ?opentelemetry_scope: [String, String]?,
+                         ?opentelemetry_kind: Symbol?,
+                         ?opentelemetry_relationship: Symbol?
+                       ) ?{ (Transaction transaction) -> void } -> void
 
   # Set an error on the current transaction.
   # 
@@ -477,6 +521,14 @@ module Appsignal
   # 
   # _@param_ `exception` — The error to add to the current transaction.
   # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`. Only used when a new transaction is created.
+  # 
+  # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`. Only used when a new transaction is created.
+  # 
+  # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to. Only used when a new transaction is created.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+  # 
   # ```ruby
   # class SomeController < ApplicationController
   #   def create
@@ -498,7 +550,13 @@ module Appsignal
   # ```
   # 
   # _@see_ `https://docs.appsignal.com/ruby/instrumentation/exception-handling.html` — Exception handling guide
-  def self.report_error: (Exception exception) ?{ (Transaction transaction) -> void } -> void
+  def self.report_error: (
+                           Exception exception,
+                           ?opentelemetry_context: untyped,
+                           ?opentelemetry_scope: [String, String]?,
+                           ?opentelemetry_kind: Symbol?,
+                           ?opentelemetry_relationship: Symbol?
+                         ) ?{ (Transaction transaction) -> void } -> void
 
   # Set a custom action name for the current transaction.
   # 
@@ -691,16 +749,62 @@ module Appsignal
   # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-parameters.html` — Parameter filtering guide
   def self.add_params: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
 
+  # Add the request payload to the current transaction.
+  # 
+  # The request payload is the parameters of an incoming request, such as
+  # the query string and the request body. In collector mode it maps to its
+  # own attribute, separate from the function parameters.
+  # 
+  # Behaves like {#add_params}: merges when called multiple times, and a
+  # block takes precedence over the argument.
+  # 
+  # _@param_ `params` — The request payload to add to the transaction.
+  # 
+  # _@see_ `#add_function_parameters`
+  def self.add_request_payload: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+  # Add the function parameters to the current transaction.
+  # 
+  # The function parameters are the arguments a background job or function
+  # was called with. In collector mode they map to their own attribute,
+  # separate from the request payload.
+  # 
+  # Behaves like {#add_params}: merges when called multiple times, and a
+  # block takes precedence over the argument.
+  # 
+  # _@param_ `params` — The function parameters to add to the transaction.
+  # 
+  # _@see_ `#add_request_payload`
+  def self.add_function_parameters: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+  # Add the query parameters to the current transaction.
+  # 
+  # The query parameters are the parameters parsed from an incoming
+  # request's query string. In collector mode they map to their own
+  # attribute, separate from the request payload and the function
+  # parameters.
+  # 
+  # Behaves like {#add_params}: merges when called multiple times, and a
+  # block takes precedence over the argument.
+  # 
+  # _@param_ `params` — The query parameters to add to the transaction.
+  # 
+  # _@see_ `#add_request_payload`
+  def self.add_query_parameters: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
   # Mark the parameters sample data to be set as an empty value.
   # 
-  # Use this helper to unset request parameters / background job arguments
-  # and not report any for this transaction.
+  # Use this helper to report no parameters for this transaction, whatever
+  # their source.
   # 
-  # If parameters would normally be added by AppSignal instrumentations of
-  # libraries, these parameters will not be added to the Transaction.
+  # This suppresses every params channel. In collector mode, where the
+  # request payload and the function parameters (a background job's
+  # arguments) are tracked as separate attributes, it suppresses both, not
+  # only the request payload. Parameters that an AppSignal integration would
+  # otherwise add are not added.
   # 
-  # Calling {#add_params} after this helper will add new parameters to the
-  # transaction.
+  # Calling {#add_params}, {#add_request_payload} or
+  # {#add_function_parameters} after this helper adds parameters again.
   # 
   # _@see_ `Transaction#set_empty_params!`
   # 
@@ -768,17 +872,92 @@ module Appsignal
   # # { "PATH_INFO" => "/some-path", "HTTP_USER_AGENT" => "Firefox" }
   # ```
   # 
+  # _@deprecated_ — Use {#add_request_headers} for request headers and
+  # {#add_request_environment} for the values a Rack environment holds
+  # that are not request headers. This method takes both kinds at once,
+  # so it has to work out which of them each value is.
+  # 
+  # _@see_ `#add_request_headers`
+  # 
+  # _@see_ `#add_request_environment`
+  # 
   # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
   # 
   # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-headers.html` — Request headers filtering guide
   def self.add_headers: (?::Hash[String, Object]? headers) ?{ () -> ::Hash[String, Object] } -> void
+
+  # Add request headers to the current transaction.
+  # 
+  # Request headers are automatically added by most of our integrations. It
+  # should not be necessary to call this method unless you want to also
+  # report different request headers.
+  # 
+  # Name each header the way OpenTelemetry names it, in lowercase and with
+  # dashes. In agent mode the names are converted to the Rack spellings the
+  # environment uses, so `accept` is reported as `HTTP_ACCEPT`.
+  # 
+  # To filter request headers, see our request header filtering guide.
+  # 
+  # When both the `headers` argument and a block is given to this method,
+  # the block is leading and the argument will _not_ be used.
+  # 
+  # _@param_ `headers` — The request headers to add to the transaction.
+  # 
+  # Add request headers
+  # ```ruby
+  # Appsignal.add_request_headers("accept" => "text/html")
+  # # The request headers will include:
+  # # { "accept" => "text/html" }
+  # ```
+  # 
+  # Calling `add_request_headers` multiple times merges the values
+  # ```ruby
+  # Appsignal.add_request_headers("accept" => "text/html")
+  # Appsignal.add_request_headers("user-agent" => "Firefox")
+  # # The request headers will include:
+  # # { "accept" => "text/html", "user-agent" => "Firefox" }
+  # ```
+  # 
+  # _@see_ `#add_request_environment`
+  # 
+  # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+  # 
+  # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-headers.html` — Request headers filtering guide
+  def self.add_request_headers: (?::Hash[String, Object]? headers) ?{ () -> ::Hash[String, Object] } -> void
+
+  # Add values from the request environment to the current transaction.
+  # 
+  # These are the values a Rack environment holds that are not request
+  # headers, such as `REMOTE_ADDR` and `QUERY_STRING`. Name each one the
+  # way Rack names it. Use {#add_request_headers} for the request headers.
+  # 
+  # The request environment is automatically added by most of our
+  # integrations. It should not be necessary to call this method unless you
+  # want to also report different values.
+  # 
+  # When both the `environment` argument and a block is given to this
+  # method, the block is leading and the argument will _not_ be used.
+  # 
+  # _@param_ `environment` — The request environment values to add to the transaction.
+  # 
+  # Add request environment values
+  # ```ruby
+  # Appsignal.add_request_environment("REMOTE_ADDR" => "127.0.0.1")
+  # # The request environment will include:
+  # # { "REMOTE_ADDR" => "127.0.0.1" }
+  # ```
+  # 
+  # _@see_ `#add_request_headers`
+  # 
+  # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+  def self.add_request_environment: (?::Hash[String, Object]? environment) ?{ () -> ::Hash[String, Object] } -> void
 
   # Add breadcrumbs to the transaction.
   # 
   # Breadcrumbs can be used to trace what path a user has taken
   # before encountering an error.
   # 
-  # Only the last 20 added breadcrumbs will be saved.
+  # At most 20 of the added breadcrumbs will be saved.
   # 
   # _@param_ `category` — category of breadcrumb e.g. "UI", "Network", "Navigation", "Console".
   # 
@@ -833,6 +1012,10 @@ module Appsignal
   # 
   # _@param_ `body_format` — Enum for the type of event that is instrumented. Accepted values are {EventFormatter::DEFAULT} and {EventFormatter::SQL_BODY_FORMAT}, but we recommend you use {.instrument_sql} instead of {EventFormatter::SQL_BODY_FORMAT}.
   # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind for the event's span, such as `:client` for an outgoing HTTP request. Defaults to the OpenTelemetry default of `:internal`.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record the event's span under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+  # 
   # _@return_ — Returns the block's return value.
   # 
   # Simple instrumentation
@@ -862,7 +1045,9 @@ module Appsignal
                          String name,
                          ?String? title,
                          ?String? body,
-                         ?Integer body_format
+                         ?Integer body_format,
+                         ?opentelemetry_kind: Symbol?,
+                         ?opentelemetry_scope: [String, String]?
                        ) -> Object
 
   # Instrumentation helper for SQL queries.
@@ -874,6 +1059,10 @@ module Appsignal
   # _@param_ `title` — Human readable name of the event.
   # 
   # _@param_ `body` — SQL query that's being executed.
+  # 
+  # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind for the event's span. Defaults to `:client`, because a query is an outgoing call to a datastore. Pass `:internal` for a query that is not an outgoing call.
+  # 
+  # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record the event's span under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
   # 
   # _@return_ — Returns the block's return value.
   # 
@@ -898,7 +1087,13 @@ module Appsignal
   # _@see_ `https://docs.appsignal.com/ruby/instrumentation/instrumentation.html` — AppSignal custom instrumentation guide
   # 
   # _@see_ `https://docs.appsignal.com/api/event-names.html` — AppSignal event naming guide
-  def self.instrument_sql: (String name, ?String? title, ?String? body) -> Object
+  def self.instrument_sql: (
+                             String name,
+                             ?String? title,
+                             ?String? body,
+                             ?opentelemetry_kind: Symbol,
+                             ?opentelemetry_scope: [String, String]?
+                           ) -> Object
 
   # Convenience method for ignoring instrumentation events in a block of
   # code.
@@ -990,6 +1185,36 @@ module Appsignal
     # 
     # _@return_ — True if valid and active for the current environment.
     def active?: () -> bool
+
+    # Check if collector mode is configured.
+    # 
+    # Returns true when a non-empty `collector_endpoint` is set and the
+    # running Ruby version is at least {MIN_RUBY_VERSION_FOR_COLLECTOR_MODE}.
+    # On older Rubies, `collector_endpoint` is ignored (with a warning) and
+    # the AppSignal agent is used instead.
+    # 
+    # This is the *intent* check — it answers "did the user ask for
+    # collector mode, and could we honor it?". It does not say whether the
+    # OpenTelemetry SDK actually booted. See {#collector_mode?} for that.
+    # 
+    # Memoised: the result is cached on first call so hot paths avoid
+    # re-running the string-strip predicate, and so the unsupported-Ruby
+    # warning is emitted at most once per `Config` instance.
+    # 
+    # _@return_ — True if collector mode is configured.
+    def collector_mode_configured?: () -> bool
+
+    # Check if AppSignal is actively running in collector mode.
+    # 
+    # True only if collector mode is {#collector_mode_configured? configured}
+    # *and* `Appsignal::OpenTelemetry.configure` has successfully booted the
+    # SDK in this process. Use this for backend dispatch on hot paths
+    # (metric and log emits): if the OTel boot failed, callers fall back to
+    # the agent backend rather than silently dropping data into no-op
+    # providers.
+    # 
+    # _@return_ — True if collector mode is configured and started.
+    def collector_mode?: () -> bool
 
     def yml_config_file?: () -> bool
 
@@ -1105,6 +1330,9 @@ module Appsignal
       # _@return_ — Configure whether host metrics collection is enabled
       attr_accessor enable_host_metrics: bool
 
+      # _@return_ — Configure whether to record an event when a background job is enqueued
+      attr_accessor enable_job_enqueue_instrumentation: bool
+
       # _@return_ — Configure whether minutely probes are enabled
       attr_accessor enable_minutely_probes: bool
 
@@ -1132,11 +1360,23 @@ module Appsignal
       # _@return_ — Configure whether files created by AppSignal should be world accessible
       attr_accessor files_world_accessible: bool
 
+      # _@return_ — Configure whether to instrument Active Job
+      attr_accessor instrument_active_job: bool
+
+      # _@return_ — Configure whether to instrument Delayed Job
+      attr_accessor instrument_delayed_job: bool
+
+      # _@return_ — Configure whether to instrument requests made with the Excon gem
+      attr_accessor instrument_excon: bool
+
       # _@return_ — Configure whether to instrument requests made with the Faraday gem
       attr_accessor instrument_faraday: bool
 
       # _@return_ — Configure whether to instrument requests made with the http.rb gem
       attr_accessor instrument_http_rb: bool
+
+      # _@return_ — Configure whether to instrument MongoDB queries
+      attr_accessor instrument_mongo: bool
 
       # _@return_ — Configure whether to instrument requests made with Net::HTTP
       attr_accessor instrument_net_http: bool
@@ -1144,11 +1384,23 @@ module Appsignal
       # _@return_ — Configure whether to instrument the Ownership gem
       attr_accessor instrument_ownership: bool
 
+      # _@return_ — Configure whether to instrument Que
+      attr_accessor instrument_que: bool
+
       # _@return_ — Configure whether to instrument Redis queries
       attr_accessor instrument_redis: bool
 
+      # _@return_ — Configure whether to instrument Resque
+      attr_accessor instrument_resque: bool
+
       # _@return_ — Configure whether to instrument Sequel queries
       attr_accessor instrument_sequel: bool
+
+      # _@return_ — Configure whether to instrument Shoryuken
+      attr_accessor instrument_shoryuken: bool
+
+      # _@return_ — Configure whether to instrument Sidekiq
+      attr_accessor instrument_sidekiq: bool
 
       # _@return_ — Configure whether the Ownership gem instrumentation should set namespace
       attr_accessor ownership_set_namespace: bool
@@ -1188,6 +1440,14 @@ module Appsignal
 
       # _@return_ — Ignore traces by namespaces
       attr_accessor ignore_namespaces: ::Array[String]
+
+      # _@return_ — Rack environment keys to report in collector
+      # mode, named the way Rack names them
+      attr_accessor keep_request_environment: ::Array[String]
+
+      # _@return_ — HTTP request headers to report in collector
+      # mode, named the way OpenTelemetry names them
+      attr_accessor keep_request_headers: ::Array[String]
 
       # _@return_ — HTTP request headers to include in error reports
       attr_accessor request_headers: ::Array[String]
@@ -1500,7 +1760,21 @@ module Appsignal
     # transaction.
     # 
     # _@param_ `namespace` — Namespace of the to be created transaction.
-    def self.create: (String namespace) -> Transaction
+    # 
+    # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+    # 
+    # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+    # 
+    # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+    # 
+    # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+    def self.create: (
+                       String namespace,
+                       ?opentelemetry_context: untyped,
+                       ?opentelemetry_scope: [String, String]?,
+                       ?opentelemetry_kind: Symbol?,
+                       ?opentelemetry_relationship: Symbol?
+                     ) -> Transaction
 
     # Returns currently active transaction or a {NilTransaction} if none is
     # active.
@@ -1532,6 +1806,49 @@ module Appsignal
     # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
     def add_params: (?(::Hash[String, Object] | ::Array[Object])? given_params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
 
+    # Add the request payload to the transaction.
+    # 
+    # These are the parameters of an incoming request, such as the query string
+    # and the request body. In collector mode they map to the request payload
+    # attribute. In agent mode they are the transaction's params.
+    # 
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    # 
+    # _@param_ `given_params` — The parameters to add to the transaction.
+    # 
+    # _@see_ `#add_function_parameters`
+    def add_request_payload: (?(::Hash[String, Object] | ::Array[Object])? given_params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+    # Add the function parameters to the transaction.
+    # 
+    # These are the arguments a background job or function was called with. In
+    # collector mode they map to the function parameters attribute. In agent
+    # mode they are the transaction's params.
+    # 
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    # 
+    # _@param_ `given_params` — The parameters to add to the transaction.
+    # 
+    # _@see_ `#add_request_payload`
+    def add_function_parameters: (?(::Hash[String, Object] | ::Array[Object])? given_params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+    # Add the query parameters to the transaction.
+    # 
+    # These are the parameters parsed from an incoming request's query string.
+    # In collector mode they map to their own attribute, separate from the
+    # request payload and the function parameters. In agent mode they are the
+    # transaction's params.
+    # 
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    # 
+    # _@param_ `given_params` — The parameters to add to the transaction.
+    # 
+    # _@see_ `#add_request_payload`
+    def add_query_parameters: (?(::Hash[String, Object] | ::Array[Object])? given_params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
     # Add tags to the transaction.
     # 
     # When this method is called multiple times, it will merge the tags.
@@ -1561,10 +1878,48 @@ module Appsignal
     # 
     # _@param_ `given_headers` — A hash containing headers.
     # 
+    # _@deprecated_ — Use {#add_request_headers} for request headers and
+    # {#add_request_environment} for the values a Rack environment holds that
+    # are not request headers. This method takes both kinds at once, so it
+    # has to work out which of them each value is.
+    # 
     # _@see_ `Helpers::Instrumentation#add_headers`
     # 
     # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
     def add_headers: (?::Hash[String, Object]? given_headers) ?{ () -> ::Hash[String, Object] } -> void
+
+    # Add request headers to the transaction.
+    # 
+    # Name each header the way OpenTelemetry names it, in lowercase and with
+    # dashes, such as `accept` and `content-length`. In agent mode the names
+    # are converted to the Rack spellings the environment uses, such as
+    # `HTTP_ACCEPT`.
+    # 
+    # Behaves like {#add_headers}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    # 
+    # _@param_ `given_headers` — A hash containing request headers.
+    # 
+    # _@see_ `#add_request_environment`
+    # 
+    # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+    def add_request_headers: (?::Hash[String, Object]? given_headers) ?{ () -> ::Hash[String, Object] } -> void
+
+    # Add values from the request environment to the transaction.
+    # 
+    # These are the values a Rack environment holds that are not request
+    # headers, such as `REMOTE_ADDR` and `QUERY_STRING`. Name each one the way
+    # Rack names it. Use {#add_request_headers} for the request headers.
+    # 
+    # Behaves like {#add_headers}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    # 
+    # _@param_ `given_environment` — A hash containing request environment values.
+    # 
+    # _@see_ `#add_request_headers`
+    # 
+    # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+    def add_request_environment: (?::Hash[String, Object]? given_environment) ?{ () -> ::Hash[String, Object] } -> void
 
     # Add custom data to the transaction.
     # 
@@ -1632,6 +1987,35 @@ module Appsignal
     # 
     # _@param_ `start` — Queue start time in milliseconds.
     def set_queue_start: (Integer start) -> void
+
+    # Add OpenTelemetry attributes to the span AppSignal is currently
+    # recording.
+    # 
+    # In collector mode, AppSignal records a transaction as an OpenTelemetry
+    # span, and every instrumented event as a child span. This adds attributes
+    # to whichever of those spans is open right now: the innermost event
+    # started by {Appsignal::Helpers::Instrumentation#instrument}, or the
+    # transaction's own span when no event is open.
+    # 
+    # Use this to describe what is being instrumented in OpenTelemetry's own
+    # terms, following the OpenTelemetry semantic conventions where they apply.
+    # Attributes have no equivalent outside collector mode, so this does
+    # nothing when collector mode is not active.
+    # 
+    # _@param_ `attributes` — Attributes to add to the current span. Values that are not a String, Integer, Float or boolean are converted to a String. Nothing is added when this is nil or empty.
+    # 
+    # Describing a database query
+    # ```ruby
+    # Appsignal.instrument("query.my_database") do
+    #   Appsignal::Transaction.current.add_opentelemetry_attributes(
+    #     "db.system.name" => "mysql"
+    #   )
+    #   run_the_query
+    # end
+    # ```
+    # 
+    # _@see_ `https://opentelemetry.io/docs/specs/semconv/` — OpenTelemetry semantic conventions
+    def add_opentelemetry_attributes: (?::Hash[String, Object]? attributes) -> void
   end
 
   # Custom markers are used on AppSignal.com to indicate events in an
@@ -1773,6 +2157,14 @@ module Appsignal
       # 
       # _@param_ `action` — The action name for the transaction. The action name is required to be set for the transaction to be reported. The argument can be set to `nil` or `:set_later` if the action is set within the block with {#set_action}. This will not update the active transaction's action if {.monitor} is called when another transaction is already active.
       # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+      # 
+      # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+      # 
+      # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+      # 
       # _@return_ — The value of the given block is returned.
       # Returns `nil` if there already is a transaction active and no block
       # was given.
@@ -1863,7 +2255,14 @@ module Appsignal
       # ```
       # 
       # _@see_ `https://docs.appsignal.com/ruby/instrumentation/background-jobs.html` — Monitor guide
-      def monitor: (action: (String | Symbol | NilClass), ?namespace: (String | Symbol)?) ?{ () -> Object } -> Object?
+      def monitor: (
+                     action: (String | Symbol | NilClass),
+                     ?namespace: (String | Symbol)?,
+                     ?opentelemetry_context: untyped,
+                     ?opentelemetry_scope: [String, String]?,
+                     ?opentelemetry_kind: Symbol?,
+                     ?opentelemetry_relationship: Symbol?
+                   ) ?{ () -> Object } -> Object?
 
       # Instrument a block of code and stop AppSignal.
       # 
@@ -1877,10 +2276,25 @@ module Appsignal
       # 
       # _@param_ `action` — The action name for the transaction. The action name is required to be set for the transaction to be reported. The argument can be set to `nil` or `:set_later` if the action is set within the block with {#set_action}. This will not update the active transaction's action if {.monitor} is called when another transaction is already active.
       # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+      # 
+      # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+      # 
+      # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+      # 
       # _@return_ — The value of the given block is returned.
       # 
       # _@see_ `monitor`
-      def monitor_and_stop: (action: (String | Symbol | NilClass), ?namespace: (String | Symbol)?) ?{ () -> Object } -> Object?
+      def monitor_and_stop: (
+                              action: (String | Symbol | NilClass),
+                              ?namespace: (String | Symbol)?,
+                              ?opentelemetry_context: untyped,
+                              ?opentelemetry_scope: [String, String]?,
+                              ?opentelemetry_kind: Symbol?,
+                              ?opentelemetry_relationship: Symbol?
+                            ) ?{ () -> Object } -> Object?
 
       # Send an error to AppSignal regardless of the context.
       # 
@@ -1898,6 +2312,14 @@ module Appsignal
       # "error" is not a class extended from Ruby's Exception class.
       # 
       # _@param_ `error` — The error to send to AppSignal.
+      # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`.
+      # 
+      # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+      # 
+      # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
       # 
       # Send an exception
       # ```ruby
@@ -1919,7 +2341,13 @@ module Appsignal
       # ```
       # 
       # _@see_ `https://docs.appsignal.com/ruby/instrumentation/exception-handling.html` — Exception handling guide
-      def send_error: (Exception error) ?{ (Transaction transaction) -> void } -> void
+      def send_error: (
+                        Exception error,
+                        ?opentelemetry_context: untyped,
+                        ?opentelemetry_scope: [String, String]?,
+                        ?opentelemetry_kind: Symbol?,
+                        ?opentelemetry_relationship: Symbol?
+                      ) ?{ (Transaction transaction) -> void } -> void
 
       # Set an error on the current transaction.
       # 
@@ -1991,6 +2419,14 @@ module Appsignal
       # 
       # _@param_ `exception` — The error to add to the current transaction.
       # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind: one of `:server`, `:consumer`, `:producer` or `:internal`. Defaults to `:server`. Only used when a new transaction is created.
+      # 
+      # _@param_ `opentelemetry_relationship` — In collector mode, how an incoming `opentelemetry_context` relates to this transaction's span: one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`. Only used when a new transaction is created.
+      # 
+      # _@param_ `opentelemetry_context` — In collector mode, an incoming OpenTelemetry trace context to relate this transaction's span to. Only used when a new transaction is created.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record this transaction's spans under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+      # 
       # ```ruby
       # class SomeController < ApplicationController
       #   def create
@@ -2012,7 +2448,13 @@ module Appsignal
       # ```
       # 
       # _@see_ `https://docs.appsignal.com/ruby/instrumentation/exception-handling.html` — Exception handling guide
-      def report_error: (Exception exception) ?{ (Transaction transaction) -> void } -> void
+      def report_error: (
+                          Exception exception,
+                          ?opentelemetry_context: untyped,
+                          ?opentelemetry_scope: [String, String]?,
+                          ?opentelemetry_kind: Symbol?,
+                          ?opentelemetry_relationship: Symbol?
+                        ) ?{ (Transaction transaction) -> void } -> void
 
       # Set a custom action name for the current transaction.
       # 
@@ -2205,16 +2647,62 @@ module Appsignal
       # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-parameters.html` — Parameter filtering guide
       def add_params: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
 
+      # Add the request payload to the current transaction.
+      # 
+      # The request payload is the parameters of an incoming request, such as
+      # the query string and the request body. In collector mode it maps to its
+      # own attribute, separate from the function parameters.
+      # 
+      # Behaves like {#add_params}: merges when called multiple times, and a
+      # block takes precedence over the argument.
+      # 
+      # _@param_ `params` — The request payload to add to the transaction.
+      # 
+      # _@see_ `#add_function_parameters`
+      def add_request_payload: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+      # Add the function parameters to the current transaction.
+      # 
+      # The function parameters are the arguments a background job or function
+      # was called with. In collector mode they map to their own attribute,
+      # separate from the request payload.
+      # 
+      # Behaves like {#add_params}: merges when called multiple times, and a
+      # block takes precedence over the argument.
+      # 
+      # _@param_ `params` — The function parameters to add to the transaction.
+      # 
+      # _@see_ `#add_request_payload`
+      def add_function_parameters: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
+      # Add the query parameters to the current transaction.
+      # 
+      # The query parameters are the parameters parsed from an incoming
+      # request's query string. In collector mode they map to their own
+      # attribute, separate from the request payload and the function
+      # parameters.
+      # 
+      # Behaves like {#add_params}: merges when called multiple times, and a
+      # block takes precedence over the argument.
+      # 
+      # _@param_ `params` — The query parameters to add to the transaction.
+      # 
+      # _@see_ `#add_request_payload`
+      def add_query_parameters: (?(::Hash[String, Object] | ::Array[Object])? params) ?{ () -> (::Hash[String, Object] | ::Array[Object]) } -> void
+
       # Mark the parameters sample data to be set as an empty value.
       # 
-      # Use this helper to unset request parameters / background job arguments
-      # and not report any for this transaction.
+      # Use this helper to report no parameters for this transaction, whatever
+      # their source.
       # 
-      # If parameters would normally be added by AppSignal instrumentations of
-      # libraries, these parameters will not be added to the Transaction.
+      # This suppresses every params channel. In collector mode, where the
+      # request payload and the function parameters (a background job's
+      # arguments) are tracked as separate attributes, it suppresses both, not
+      # only the request payload. Parameters that an AppSignal integration would
+      # otherwise add are not added.
       # 
-      # Calling {#add_params} after this helper will add new parameters to the
-      # transaction.
+      # Calling {#add_params}, {#add_request_payload} or
+      # {#add_function_parameters} after this helper adds parameters again.
       # 
       # _@see_ `Transaction#set_empty_params!`
       # 
@@ -2282,17 +2770,92 @@ module Appsignal
       # # { "PATH_INFO" => "/some-path", "HTTP_USER_AGENT" => "Firefox" }
       # ```
       # 
+      # _@deprecated_ — Use {#add_request_headers} for request headers and
+      # {#add_request_environment} for the values a Rack environment holds
+      # that are not request headers. This method takes both kinds at once,
+      # so it has to work out which of them each value is.
+      # 
+      # _@see_ `#add_request_headers`
+      # 
+      # _@see_ `#add_request_environment`
+      # 
       # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
       # 
       # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-headers.html` — Request headers filtering guide
       def add_headers: (?::Hash[String, Object]? headers) ?{ () -> ::Hash[String, Object] } -> void
+
+      # Add request headers to the current transaction.
+      # 
+      # Request headers are automatically added by most of our integrations. It
+      # should not be necessary to call this method unless you want to also
+      # report different request headers.
+      # 
+      # Name each header the way OpenTelemetry names it, in lowercase and with
+      # dashes. In agent mode the names are converted to the Rack spellings the
+      # environment uses, so `accept` is reported as `HTTP_ACCEPT`.
+      # 
+      # To filter request headers, see our request header filtering guide.
+      # 
+      # When both the `headers` argument and a block is given to this method,
+      # the block is leading and the argument will _not_ be used.
+      # 
+      # _@param_ `headers` — The request headers to add to the transaction.
+      # 
+      # Add request headers
+      # ```ruby
+      # Appsignal.add_request_headers("accept" => "text/html")
+      # # The request headers will include:
+      # # { "accept" => "text/html" }
+      # ```
+      # 
+      # Calling `add_request_headers` multiple times merges the values
+      # ```ruby
+      # Appsignal.add_request_headers("accept" => "text/html")
+      # Appsignal.add_request_headers("user-agent" => "Firefox")
+      # # The request headers will include:
+      # # { "accept" => "text/html", "user-agent" => "Firefox" }
+      # ```
+      # 
+      # _@see_ `#add_request_environment`
+      # 
+      # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+      # 
+      # _@see_ `https://docs.appsignal.com/guides/filter-data/filter-headers.html` — Request headers filtering guide
+      def add_request_headers: (?::Hash[String, Object]? headers) ?{ () -> ::Hash[String, Object] } -> void
+
+      # Add values from the request environment to the current transaction.
+      # 
+      # These are the values a Rack environment holds that are not request
+      # headers, such as `REMOTE_ADDR` and `QUERY_STRING`. Name each one the
+      # way Rack names it. Use {#add_request_headers} for the request headers.
+      # 
+      # The request environment is automatically added by most of our
+      # integrations. It should not be necessary to call this method unless you
+      # want to also report different values.
+      # 
+      # When both the `environment` argument and a block is given to this
+      # method, the block is leading and the argument will _not_ be used.
+      # 
+      # _@param_ `environment` — The request environment values to add to the transaction.
+      # 
+      # Add request environment values
+      # ```ruby
+      # Appsignal.add_request_environment("REMOTE_ADDR" => "127.0.0.1")
+      # # The request environment will include:
+      # # { "REMOTE_ADDR" => "127.0.0.1" }
+      # ```
+      # 
+      # _@see_ `#add_request_headers`
+      # 
+      # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+      def add_request_environment: (?::Hash[String, Object]? environment) ?{ () -> ::Hash[String, Object] } -> void
 
       # Add breadcrumbs to the transaction.
       # 
       # Breadcrumbs can be used to trace what path a user has taken
       # before encountering an error.
       # 
-      # Only the last 20 added breadcrumbs will be saved.
+      # At most 20 of the added breadcrumbs will be saved.
       # 
       # _@param_ `category` — category of breadcrumb e.g. "UI", "Network", "Navigation", "Console".
       # 
@@ -2347,6 +2910,10 @@ module Appsignal
       # 
       # _@param_ `body_format` — Enum for the type of event that is instrumented. Accepted values are {EventFormatter::DEFAULT} and {EventFormatter::SQL_BODY_FORMAT}, but we recommend you use {.instrument_sql} instead of {EventFormatter::SQL_BODY_FORMAT}.
       # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind for the event's span, such as `:client` for an outgoing HTTP request. Defaults to the OpenTelemetry default of `:internal`.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record the event's span under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
+      # 
       # _@return_ — Returns the block's return value.
       # 
       # Simple instrumentation
@@ -2376,7 +2943,9 @@ module Appsignal
                         String name,
                         ?String? title,
                         ?String? body,
-                        ?Integer body_format
+                        ?Integer body_format,
+                        ?opentelemetry_kind: Symbol?,
+                        ?opentelemetry_scope: [String, String]?
                       ) -> Object
 
       # Instrumentation helper for SQL queries.
@@ -2388,6 +2957,10 @@ module Appsignal
       # _@param_ `title` — Human readable name of the event.
       # 
       # _@param_ `body` — SQL query that's being executed.
+      # 
+      # _@param_ `opentelemetry_kind` — In collector mode, the OpenTelemetry span kind for the event's span. Defaults to `:client`, because a query is an outgoing call to a datastore. Pass `:internal` for a query that is not an outgoing call.
+      # 
+      # _@param_ `opentelemetry_scope` — In collector mode, the OpenTelemetry instrumentation scope to record the event's span under, given as a `[name, version]` pair. Defaults to the AppSignal scope.
       # 
       # _@return_ — Returns the block's return value.
       # 
@@ -2412,7 +2985,13 @@ module Appsignal
       # _@see_ `https://docs.appsignal.com/ruby/instrumentation/instrumentation.html` — AppSignal custom instrumentation guide
       # 
       # _@see_ `https://docs.appsignal.com/api/event-names.html` — AppSignal event naming guide
-      def instrument_sql: (String name, ?String? title, ?String? body) -> Object
+      def instrument_sql: (
+                            String name,
+                            ?String? title,
+                            ?String? body,
+                            ?opentelemetry_kind: Symbol,
+                            ?opentelemetry_scope: [String, String]?
+                          ) -> Object
 
       # Convenience method for ignoring instrumentation events in a block of
       # code.
@@ -2450,6 +3029,9 @@ module Appsignal
 
   class NotStartedError < Appsignal::InternalError
     def message: () -> String
+  end
+
+  module Metrics
   end
 end
 

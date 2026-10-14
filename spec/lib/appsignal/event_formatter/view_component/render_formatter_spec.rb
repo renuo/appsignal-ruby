@@ -6,11 +6,15 @@ describe Appsignal::EventFormatter::ViewComponent::RenderFormatter do
       let(:formatter) { klass.new }
       before { allow(Rails.root).to receive(:to_s).and_return("/var/www/app/20130101") }
 
-      it "registers render.view_component and (deprecated) !render.view_component" do
+      it "registers render.view_component" do
         expect(Appsignal::EventFormatter.registered?("render.view_component",
           klass)).to be_truthy
-        expect(Appsignal::EventFormatter.registered?("!render.view_component",
-          klass)).to be_truthy
+      end
+
+      describe "#opentelemetry_attributes" do
+        subject { formatter.opentelemetry_attributes({}) }
+
+        it { is_expected.to eq("appsignal.group" => "render") }
       end
 
       describe "#format" do
@@ -30,11 +34,33 @@ describe Appsignal::EventFormatter::ViewComponent::RenderFormatter do
     end
   else
     context "when not in a Rails app" do
-      it "does not register the event formatter" do
+      let(:formatter) { klass.new }
+
+      it "registers render.view_component" do
         expect(Appsignal::EventFormatter.registered?("render.view_component",
-          klass)).to be_falsy
-        expect(Appsignal::EventFormatter.registered?("!render.view_component",
-          klass)).to be_falsy
+          klass)).to be_truthy
+      end
+
+      describe "#opentelemetry_attributes" do
+        subject { formatter.opentelemetry_attributes({}) }
+
+        it "still says the event is template rendering" do
+          is_expected.to eq("appsignal.group" => "render")
+        end
+      end
+
+      describe "#format" do
+        subject { formatter.format(payload) }
+
+        let(:payload) do
+          {
+            :name => "WhateverComponent",
+            :identifier => "/var/www/app/20130101/app/components/whatever_component.rb"
+          }
+        end
+
+        # There is no application root to make the component's path relative to.
+        it { is_expected.to be_nil }
       end
     end
   end

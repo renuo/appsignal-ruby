@@ -91,11 +91,13 @@ module Appsignal
     DEFAULT_CONFIG = {
       :activejob_report_errors => "all",
       :ca_file_path => File.expand_path(File.join("../../../resources/cacert.pem"), __FILE__),
+      :collector_endpoint => nil,
       :dns_servers => [],
       :enable_allocation_tracking => true,
       :enable_at_exit_hook => "on_error",
       :enable_at_exit_reporter => true,
       :enable_host_metrics => true,
+      :enable_job_enqueue_instrumentation => true,
       :enable_minutely_probes => true,
       :enable_statsd => true,
       :enable_nginx_metrics => false,
@@ -106,20 +108,37 @@ module Appsignal
       :enable_rake_performance_instrumentation => false,
       :endpoint => "https://push.appsignal.com",
       :files_world_accessible => true,
+      :filter_attributes => [],
+      :filter_function_parameters => [],
       :filter_metadata => [],
       :filter_parameters => [],
+      :filter_request_payload => [],
+      :filter_request_query_parameters => [],
       :filter_session_data => [],
       :ignore_actions => [],
       :ignore_errors => [],
       :ignore_logs => [],
       :ignore_namespaces => [],
+      :instrument_active_job => true,
       :instrument_code_ownership => true,
+      :instrument_delayed_job => true,
+      :instrument_excon => true,
       :instrument_faraday => true,
       :instrument_http_rb => true,
+      :instrument_mongo => true,
       :instrument_net_http => true,
       :instrument_ownership => true,
+      :instrument_que => true,
       :instrument_redis => true,
+      :instrument_resque => true,
       :instrument_sequel => true,
+      :instrument_shoryuken => true,
+      :instrument_sidekiq => true,
+      :keep_request_environment => [],
+      :keep_request_headers => %w[
+        accept accept-charset accept-encoding accept-language cache-control
+        connection content-length range
+      ],
       :log => "file",
       :logging_endpoint => "https://appsignal-endpoint.net",
       :ownership_set_namespace => false,
@@ -130,9 +149,14 @@ module Appsignal
         REQUEST_METHOD REQUEST_PATH SERVER_NAME SERVER_PORT
         SERVER_PROTOCOL
       ],
+      :response_headers => [],
       :send_environment_metadata => true,
+      :send_function_parameters => true,
       :send_params => true,
+      :send_request_payload => true,
+      :send_request_query_parameters => true,
       :send_session_data => true,
+      :service_name => "app",
       :sidekiq_report_errors => "all",
       :default_tags => {}
     }.freeze
@@ -152,12 +176,24 @@ module Appsignal
       "trace" => ::Logger::DEBUG
     }.freeze
 
+    # Environment variables set by deployment platforms that name the
+    # revision that is being deployed, in the order they are read.
+    # @!visibility private
+    PLATFORM_REVISION_ENV_VARS = [
+      "HEROKU_BUILD_COMMIT",
+      "HEROKU_SLUG_COMMIT",
+      "RENDER_GIT_COMMIT",
+      "KAMAL_VERSION",
+      "CONTAINER_VERSION" # Scalingo
+    ].freeze
+
     # @!visibility private
     STRING_OPTIONS = {
       :activejob_report_errors => "APPSIGNAL_ACTIVEJOB_REPORT_ERRORS",
       :name => "APPSIGNAL_APP_NAME",
       :bind_address => "APPSIGNAL_BIND_ADDRESS",
       :ca_file_path => "APPSIGNAL_CA_FILE_PATH",
+      :collector_endpoint => "APPSIGNAL_COLLECTOR_ENDPOINT",
       :enable_at_exit_hook => "APPSIGNAL_ENABLE_AT_EXIT_HOOK",
       :hostname => "APPSIGNAL_HOSTNAME",
       :host_role => "APPSIGNAL_HOST_ROLE",
@@ -168,6 +204,7 @@ module Appsignal
       :logging_endpoint => "APPSIGNAL_LOGGING_ENDPOINT",
       :endpoint => "APPSIGNAL_PUSH_API_ENDPOINT",
       :push_api_key => "APPSIGNAL_PUSH_API_KEY",
+      :service_name => "APPSIGNAL_SERVICE_NAME",
       :sidekiq_report_errors => "APPSIGNAL_SIDEKIQ_REPORT_ERRORS",
       :statsd_port => "APPSIGNAL_STATSD_PORT",
       :nginx_port => "APPSIGNAL_NGINX_PORT",
@@ -181,6 +218,8 @@ module Appsignal
       :enable_allocation_tracking => "APPSIGNAL_ENABLE_ALLOCATION_TRACKING",
       :enable_at_exit_reporter => "APPSIGNAL_ENABLE_AT_EXIT_REPORTER",
       :enable_host_metrics => "APPSIGNAL_ENABLE_HOST_METRICS",
+      :enable_job_enqueue_instrumentation =>
+        "APPSIGNAL_ENABLE_JOB_ENQUEUE_INSTRUMENTATION",
       :enable_minutely_probes => "APPSIGNAL_ENABLE_MINUTELY_PROBES",
       :enable_statsd => "APPSIGNAL_ENABLE_STATSD",
       :enable_nginx_metrics => "APPSIGNAL_ENABLE_NGINX_METRICS",
@@ -192,31 +231,49 @@ module Appsignal
       :enable_rake_performance_instrumentation =>
         "APPSIGNAL_ENABLE_RAKE_PERFORMANCE_INSTRUMENTATION",
       :files_world_accessible => "APPSIGNAL_FILES_WORLD_ACCESSIBLE",
+      :instrument_active_job => "APPSIGNAL_INSTRUMENT_ACTIVE_JOB",
       :instrument_code_ownership => "APPSIGNAL_INSTRUMENT_CODE_OWNERSHIP",
+      :instrument_delayed_job => "APPSIGNAL_INSTRUMENT_DELAYED_JOB",
+      :instrument_excon => "APPSIGNAL_INSTRUMENT_EXCON",
       :instrument_faraday => "APPSIGNAL_INSTRUMENT_FARADAY",
       :instrument_http_rb => "APPSIGNAL_INSTRUMENT_HTTP_RB",
+      :instrument_mongo => "APPSIGNAL_INSTRUMENT_MONGO",
       :instrument_net_http => "APPSIGNAL_INSTRUMENT_NET_HTTP",
       :instrument_ownership => "APPSIGNAL_INSTRUMENT_OWNERSHIP",
+      :instrument_que => "APPSIGNAL_INSTRUMENT_QUE",
       :instrument_redis => "APPSIGNAL_INSTRUMENT_REDIS",
+      :instrument_resque => "APPSIGNAL_INSTRUMENT_RESQUE",
       :instrument_sequel => "APPSIGNAL_INSTRUMENT_SEQUEL",
+      :instrument_shoryuken => "APPSIGNAL_INSTRUMENT_SHORYUKEN",
+      :instrument_sidekiq => "APPSIGNAL_INSTRUMENT_SIDEKIQ",
       :ownership_set_namespace => "APPSIGNAL_OWNERSHIP_SET_NAMESPACE",
       :running_in_container => "APPSIGNAL_RUNNING_IN_CONTAINER",
       :send_environment_metadata => "APPSIGNAL_SEND_ENVIRONMENT_METADATA",
+      :send_function_parameters => "APPSIGNAL_SEND_FUNCTION_PARAMETERS",
       :send_params => "APPSIGNAL_SEND_PARAMS",
+      :send_request_payload => "APPSIGNAL_SEND_REQUEST_PAYLOAD",
+      :send_request_query_parameters => "APPSIGNAL_SEND_REQUEST_QUERY_PARAMETERS",
       :send_session_data => "APPSIGNAL_SEND_SESSION_DATA"
     }.freeze
 
     # @!visibility private
     ARRAY_OPTIONS = {
       :dns_servers => "APPSIGNAL_DNS_SERVERS",
+      :filter_attributes => "APPSIGNAL_FILTER_ATTRIBUTES",
+      :filter_function_parameters => "APPSIGNAL_FILTER_FUNCTION_PARAMETERS",
       :filter_metadata => "APPSIGNAL_FILTER_METADATA",
       :filter_parameters => "APPSIGNAL_FILTER_PARAMETERS",
+      :filter_request_payload => "APPSIGNAL_FILTER_REQUEST_PAYLOAD",
+      :filter_request_query_parameters => "APPSIGNAL_FILTER_REQUEST_QUERY_PARAMETERS",
       :filter_session_data => "APPSIGNAL_FILTER_SESSION_DATA",
       :ignore_actions => "APPSIGNAL_IGNORE_ACTIONS",
       :ignore_errors => "APPSIGNAL_IGNORE_ERRORS",
       :ignore_logs => "APPSIGNAL_IGNORE_LOGS",
       :ignore_namespaces => "APPSIGNAL_IGNORE_NAMESPACES",
-      :request_headers => "APPSIGNAL_REQUEST_HEADERS"
+      :keep_request_environment => "APPSIGNAL_KEEP_REQUEST_ENVIRONMENT",
+      :keep_request_headers => "APPSIGNAL_KEEP_REQUEST_HEADERS",
+      :request_headers => "APPSIGNAL_REQUEST_HEADERS",
+      :response_headers => "APPSIGNAL_RESPONSE_HEADERS"
     }.freeze
 
     # @!visibility private
@@ -229,6 +286,67 @@ module Appsignal
       :default_tags => "APPSIGNAL_DEFAULT_TAGS"
     }.freeze
 
+    # Collector mode requires Ruby 3.1+. The OpenTelemetry Ruby SDK relies on
+    # `Process._fork` (introduced in Ruby 3.1) for its fork hooks, without
+    # which background reader threads don't restart in child processes and
+    # buffered telemetry is lost after a fork.
+    # @!visibility private
+    MIN_RUBY_VERSION_FOR_COLLECTOR_MODE = "3.1"
+
+    # @!visibility private
+    COLLECTOR_ONLY_OPTIONS = [
+      :filter_attributes,
+      :filter_function_parameters,
+      :filter_request_payload,
+      :filter_request_query_parameters,
+      :keep_request_environment,
+      :keep_request_headers,
+      :response_headers,
+      :send_function_parameters,
+      :send_request_payload,
+      :send_request_query_parameters,
+      :service_name
+    ].freeze
+
+    # @!visibility private
+    COLLECTOR_ONLY_REPLACED_OPTIONS = {
+      :filter_function_parameters => :filter_parameters,
+      :filter_request_payload => :filter_parameters,
+      :filter_request_query_parameters => :filter_parameters,
+      :keep_request_environment => :request_headers,
+      :keep_request_headers => :request_headers,
+      :send_function_parameters => :send_params,
+      :send_request_payload => :send_params,
+      :send_request_query_parameters => :send_params
+    }.freeze
+
+    # @!visibility private
+    DEPRECATED_COLLECTOR_OPTIONS = {
+      :filter_parameters => {
+        :filter_request_payload => :derived_as_is,
+        :filter_function_parameters => :derived_as_is,
+        :filter_request_query_parameters => :derived_as_is
+      },
+      :request_headers => {
+        :keep_request_headers => :derived_header_names,
+        :keep_request_environment => :derived_environment_keys
+      },
+      :send_params => {
+        :send_request_payload => :derived_as_is,
+        :send_request_query_parameters => :derived_as_is,
+        :send_function_parameters => :derived_as_is
+      }
+    }.freeze
+
+    # @!visibility private
+    SOURCE_ORDER = [
+      :default, :derived, :system, :loaders, :initial, :file, :env, :override,
+      :dsl
+    ].freeze
+
+    # @!visibility private
+    APPLICATION_SOURCES = [:initial, :file, :env, :dsl].freeze
+
     # @!visibility private
     attr_reader :root_path, :env, :config_hash
 
@@ -240,8 +358,23 @@ module Appsignal
     #
     # Used by the diagnose report to list which value was read from which source.
     # @!visibility private
-    attr_reader :system_config, :loaders_config, :initial_config, :file_config,
-      :env_config, :override_config, :dsl_config
+    attr_reader :derived_config, :system_config, :loaders_config,
+      :initial_config, :file_config, :env_config, :override_config, :dsl_config
+
+    # @!visibility private
+    def config_sources
+      {
+        :default => DEFAULT_CONFIG,
+        :derived => derived_config,
+        :system => system_config,
+        :loaders => loaders_config,
+        :initial => initial_config,
+        :file => file_config,
+        :env => env_config,
+        :override => override_config,
+        :dsl => dsl_config
+      }
+    end
 
     # Initialize a new AppSignal configuration object.
     #
@@ -277,6 +410,7 @@ module Appsignal
       @initial_config = {}
       @file_config = {}
       @env_config = {}
+      @derived_config = {}
       @override_config = {}
       @dsl_config = {} # Can be set using `Appsignal.configure`
 
@@ -433,6 +567,57 @@ module Appsignal
       valid? && active_for_env?
     end
 
+    # Check if collector mode is configured.
+    #
+    # Returns true when a non-empty `collector_endpoint` is set and the
+    # running Ruby version is at least {MIN_RUBY_VERSION_FOR_COLLECTOR_MODE}.
+    # On older Rubies, `collector_endpoint` is ignored (with a warning) and
+    # the AppSignal agent is used instead.
+    #
+    # This is the *intent* check — it answers "did the user ask for
+    # collector mode, and could we honor it?". It does not say whether the
+    # OpenTelemetry SDK actually booted. See {#collector_mode?} for that.
+    #
+    # Memoised: the result is cached on first call so hot paths avoid
+    # re-running the string-strip predicate, and so the unsupported-Ruby
+    # warning is emitted at most once per `Config` instance.
+    #
+    # @return [Boolean] True if collector mode is configured.
+    def collector_mode_configured?
+      return @collector_mode_configured if defined?(@collector_mode_configured)
+
+      endpoint = config_hash[:collector_endpoint]
+      configured = !endpoint.nil? && !endpoint.to_s.strip.empty?
+
+      if configured && Gem::Version.new(RUBY_VERSION) <
+          Gem::Version.new(MIN_RUBY_VERSION_FOR_COLLECTOR_MODE)
+        Appsignal::Utils::StdoutAndLoggerMessage.warning(
+          "Collector mode requires Ruby #{MIN_RUBY_VERSION_FOR_COLLECTOR_MODE} or higher " \
+            "(running Ruby #{RUBY_VERSION}). The `collector_endpoint` option will be " \
+            "ignored and the AppSignal agent will be used instead."
+        )
+        @collector_mode_configured = false
+      else
+        @collector_mode_configured = configured
+      end
+    end
+
+    # Check if AppSignal is actively running in collector mode.
+    #
+    # True only if collector mode is {#collector_mode_configured? configured}
+    # *and* `Appsignal::OpenTelemetry.configure` has successfully booted the
+    # SDK in this process. Use this for backend dispatch on hot paths
+    # (metric and log emits): if the OTel boot failed, callers fall back to
+    # the agent backend rather than silently dropping data into no-op
+    # providers.
+    #
+    # @return [Boolean] True if collector mode is configured and started.
+    def collector_mode?
+      collector_mode_configured? &&
+        defined?(Appsignal::OpenTelemetry) &&
+        Appsignal::OpenTelemetry.started?
+    end
+
     # @!visibility private
     def write_to_environment
       ENV["_APPSIGNAL_ACTIVE"]                       = active?.to_s
@@ -446,6 +631,10 @@ module Appsignal
       ENV["_APPSIGNAL_ENABLE_HOST_METRICS"]          = config_hash[:enable_host_metrics].to_s
       ENV["_APPSIGNAL_ENABLE_STATSD"]                = config_hash[:enable_statsd].to_s
       ENV["_APPSIGNAL_ENABLE_NGINX_METRICS"]         = config_hash[:enable_nginx_metrics].to_s
+      # The gem never sends OpenTelemetry data to the agent, so it has no
+      # reason to listen for it. Written out rather than left to the agent's
+      # own default, so a value set in the environment cannot turn it on.
+      ENV["_APPSIGNAL_ENABLE_OPENTELEMETRY_HTTP"]    = "false"
       ENV["_APPSIGNAL_APP_ENV"]                      = env
       ENV["_APPSIGNAL_FILES_WORLD_ACCESSIBLE"]       = config_hash[:files_world_accessible].to_s
       ENV["_APPSIGNAL_FILTER_PARAMETERS"]            = config_hash[:filter_parameters].join(",")
@@ -462,6 +651,7 @@ module Appsignal
       ENV["_APPSIGNAL_LOG_LEVEL"]                    = config_hash[:log_level]
       ENV["_APPSIGNAL_LOG_FILE_PATH"]                = log_file_path.to_s if log_file_path
       ENV["_APPSIGNAL_LOGGING_ENDPOINT"]             = config_hash[:logging_endpoint]
+      ENV["_APPSIGNAL_PLATFORM"]                     = config_hash[:platform].to_s
       ENV["_APPSIGNAL_PROCESS_NAME"]                 = $PROGRAM_NAME
       ENV["_APPSIGNAL_PUSH_API_ENDPOINT"]            = config_hash[:endpoint]
       ENV["_APPSIGNAL_PUSH_API_KEY"]                 = config_hash[:push_api_key]
@@ -481,9 +671,11 @@ module Appsignal
       merge(options)
     end
 
-    # Apply any overrides for invalid settings.
     # @!visibility private
     def apply_overrides
+      @derived_config = determine_derived
+      merge(derived_config)
+
       @override_config = determine_overrides
       merge(override_config)
     end
@@ -509,6 +701,25 @@ module Appsignal
       else
         @valid = true
       end
+
+      warn_for_mode_mismatch
+    end
+
+    # Emit warnings when a configuration option is set that has no effect in
+    # the current mode (collector vs. agent).
+    #
+    # Uses {#collector_mode_configured?} (intent) rather than
+    # {#collector_mode?} so the warnings fire based on what the user asked
+    # for, independent of whether the OpenTelemetry SDK successfully booted.
+    # @!visibility private
+    def warn_for_mode_mismatch
+      if collector_mode_configured?
+        warn_user_modified(DEPRECATED_COLLECTOR_OPTIONS.keys) do |option|
+          deprecated_collector_option_message(option)
+        end
+      else
+        warn_collector_only_options
+      end
     end
 
     # Deep freeze the config object so it cannot be modified during the runtime
@@ -532,6 +743,54 @@ module Appsignal
 
     private
 
+    def deprecated_collector_option_message(option)
+      replacements = DEPRECATED_COLLECTOR_OPTIONS.fetch(option).keys
+      message = "The collector is in use. The '#{option}' configuration " \
+        "option is deprecated in collector mode. It is replaced by " \
+        "#{quoted_option_list(replacements)}."
+
+      derived = replacements.select { |name| derived_config.key?(name) }
+      return message if derived.empty?
+
+      values = derived.map { |name| "\n  #{name}: #{derived_config[name].inspect}" }
+      "#{message} Set these options to keep reporting what this application " \
+        "reports now:#{values.join}"
+    end
+
+    def quoted_option_list(names)
+      names = names.map { |name| "'#{name}'" }
+      return names.first if names.length == 1
+
+      "#{names[0..-2].join(", ")} and #{names.last}"
+    end
+
+    def warn_collector_only_options
+      options = COLLECTOR_ONLY_OPTIONS.select { |option| configured?(option) }
+      return if options.empty?
+
+      options.each do |option|
+        logger.warn(
+          "The agent is in use. The '#{option}' configuration option is " \
+            "only used by the collector and will be ignored."
+        )
+
+        replacement = COLLECTOR_ONLY_REPLACED_OPTIONS[option]
+        logger.warn("Use the '#{replacement}' option instead.") if replacement
+      end
+
+      logger.info(
+        "To use the collector, set the 'collector_endpoint' configuration option."
+      )
+    end
+
+    def warn_user_modified(options)
+      options.each do |option|
+        next unless configured?(option)
+
+        logger.warn(yield(option))
+      end
+    end
+
     def logger
       Appsignal.internal_logger
     end
@@ -552,11 +811,55 @@ module Appsignal
 
         hash[:enable_at_exit_hook] = "always" if Appsignal::Extension.running_in_container?
 
-        # Set revision from REVISION file if present in project root
-        # This helps with Capistrano and Hatchbox.io deployments
-        revision_from_file = detect_revision_from_file
-        hash[:revision] = revision_from_file if revision_from_file
+        # Set the revision from the environment variable the deployment
+        # platform sets, or from a REVISION file in the project root, which
+        # helps with Capistrano and Hatchbox.io deployments.
+        revision = detect_revision_from_platform || detect_revision_from_file
+        hash[:revision] = revision if revision
+
+        hostname = detect_hostname
+        hash[:hostname] = hostname if hostname
+
+        platform = detect_platform
+        hash[:platform] = platform if platform
       end
+    end
+
+    # Detect the platform the application is deployed on, the way the agent
+    # does. The agent only detects it for the data it reports itself, so the
+    # gem has to do it for collector mode. There is no config option for it,
+    # because these are the only two platforms that can be recognized.
+    def detect_platform
+      return "dokku" unless ENV.fetch("DOKKU_ROOT", nil).to_s.empty?
+      return "heroku" unless ENV.fetch("DYNO", nil).to_s.empty?
+
+      nil
+    end
+
+    # Detect the hostname the way the agent does: the Heroku dyno name first,
+    # then the name the host reports for itself. The agent only detects it for
+    # the data it reports itself, so the gem has to do it for collector mode.
+    def detect_hostname
+      dyno = ENV.fetch("DYNO", nil)
+      return dyno unless dyno.to_s.empty?
+
+      hostname = Socket.gethostname
+      hostname unless hostname.to_s.empty?
+    rescue SystemCallError => e
+      logger.debug "Unable to detect the hostname: #{e.class}: #{e.message}"
+      nil
+    end
+
+    def detect_revision_from_platform
+      PLATFORM_REVISION_ENV_VARS.each do |env_var|
+        revision = ENV.fetch(env_var, nil)
+        next if revision.to_s.empty?
+
+        logger.debug "Detected revision from the #{env_var} environment variable"
+        return revision
+      end
+
+      nil
     end
 
     def detect_revision_from_file
@@ -696,7 +999,66 @@ module Appsignal
         config[:sidekiq_report_errors] = "all"
       end
 
+      # A config file holding a YAML null gives an array option a `nil`, which
+      # nothing downstream expects. Correct it to the empty list the option means.
+      ARRAY_OPTIONS.each_key do |option|
+        config[option] = [] if config_hash[option].nil?
+      end
+
       config
+    end
+
+    def determine_derived
+      derived = {}
+
+      DEPRECATED_COLLECTOR_OPTIONS.each do |option, replacements|
+        next unless configured?(option)
+
+        replacements.each do |replacement, derivation|
+          next if set_above_derived?(replacement)
+
+          derived[replacement] = send(derivation, config_hash[option])
+        end
+      end
+
+      derived
+    end
+
+    def derived_as_is(value)
+      value
+    end
+
+    def derived_header_names(value)
+      Array(value).filter_map do |key|
+        Appsignal::Utils::RequestHeaders.header_name(key)
+      end
+    end
+
+    def derived_environment_keys(value)
+      Array(value).reject do |key|
+        Appsignal::Utils::RequestHeaders.header_name(key) ||
+          Appsignal::Utils::RequestHeaders::TRANSLATED_ENV_KEYS.include?(key)
+      end
+    end
+
+    def configured?(option)
+      config_hash[option] != DEFAULT_CONFIG[option] && user_set?(option)
+    end
+
+    def user_set?(option)
+      set_by_any?(APPLICATION_SOURCES, option)
+    end
+
+    def set_above_derived?(option)
+      set_by_any?(sources_above_derived, option)
+    end
+
+    def sources_above_derived
+      SOURCE_ORDER[(SOURCE_ORDER.index(:derived) + 1)..] - [:override]
+    end
+
+    def set_by_any?(sources, option)
+      sources.any? { |source| config_sources.fetch(source).key?(option) }
     end
 
     def merge(new_config)
@@ -724,13 +1086,18 @@ module Appsignal
     #   https://docs.appsignal.com/ruby/configuration.html
     class ConfigDSL
       # @!visibility private
-      # @return [Hash] Hash containing the DSL option values
-      attr_reader :dsl_options
-
-      # @!visibility private
       def initialize(config)
         @config = config
         @dsl_options = {}
+        @assigned_options = Set.new
+      end
+
+      # @!visibility private
+      # @return [Hash] Hash containing the DSL option values
+      def dsl_options
+        @dsl_options.reject do |key, value|
+          !@assigned_options.include?(key) && unchanged_option?(key, value)
+        end
       end
 
       # Returns the application's root path.
@@ -828,6 +1195,8 @@ module Appsignal
       #   @return [Boolean] Configure whether the at_exit reporter is enabled
       # @!attribute [rw] enable_host_metrics
       #   @return [Boolean] Configure whether host metrics collection is enabled
+      # @!attribute [rw] enable_job_enqueue_instrumentation
+      #   @return [Boolean] Configure whether to record an event when a background job is enqueued
       # @!attribute [rw] enable_minutely_probes
       #   @return [Boolean] Configure whether minutely probes are enabled
       # @!attribute [rw] enable_statsd
@@ -846,18 +1215,34 @@ module Appsignal
       #   @return [Boolean] Configure whether Rake performance instrumentation is enabled
       # @!attribute [rw] files_world_accessible
       #   @return [Boolean] Configure whether files created by AppSignal should be world accessible
+      # @!attribute [rw] instrument_active_job
+      #   @return [Boolean] Configure whether to instrument Active Job
+      # @!attribute [rw] instrument_delayed_job
+      #   @return [Boolean] Configure whether to instrument Delayed Job
+      # @!attribute [rw] instrument_excon
+      #   @return [Boolean] Configure whether to instrument requests made with the Excon gem
       # @!attribute [rw] instrument_faraday
       #   @return [Boolean] Configure whether to instrument requests made with the Faraday gem
       # @!attribute [rw] instrument_http_rb
       #   @return [Boolean] Configure whether to instrument requests made with the http.rb gem
+      # @!attribute [rw] instrument_mongo
+      #   @return [Boolean] Configure whether to instrument MongoDB queries
       # @!attribute [rw] instrument_net_http
       #   @return [Boolean] Configure whether to instrument requests made with Net::HTTP
       # @!attribute [rw] instrument_ownership
       #   @return [Boolean] Configure whether to instrument the Ownership gem
+      # @!attribute [rw] instrument_que
+      #   @return [Boolean] Configure whether to instrument Que
       # @!attribute [rw] instrument_redis
       #   @return [Boolean] Configure whether to instrument Redis queries
+      # @!attribute [rw] instrument_resque
+      #   @return [Boolean] Configure whether to instrument Resque
       # @!attribute [rw] instrument_sequel
       #   @return [Boolean] Configure whether to instrument Sequel queries
+      # @!attribute [rw] instrument_shoryuken
+      #   @return [Boolean] Configure whether to instrument Shoryuken
+      # @!attribute [rw] instrument_sidekiq
+      #   @return [Boolean] Configure whether to instrument Sidekiq
       # @!attribute [rw] ownership_set_namespace
       #   @return [Boolean] Configure whether the Ownership gem instrumentation should set namespace
       # @!attribute [rw] running_in_container
@@ -898,6 +1283,12 @@ module Appsignal
       #   @return [Array<String>] Ignore log messages by substrings
       # @!attribute [rw] ignore_namespaces
       #   @return [Array<String>] Ignore traces by namespaces
+      # @!attribute [rw] keep_request_environment
+      #   @return [Array<String>] Rack environment keys to report in collector
+      #     mode, named the way Rack names them
+      # @!attribute [rw] keep_request_headers
+      #   @return [Array<String>] HTTP request headers to report in collector
+      #     mode, named the way OpenTelemetry names them
       # @!attribute [rw] request_headers
       #   @return [Array<String>] HTTP request headers to include in error reports
 
@@ -952,12 +1343,21 @@ module Appsignal
         if @dsl_options.key?(key)
           @dsl_options[key]
         else
-          @dsl_options[key] = @config[key].dup
+          @dsl_options[key] = initial_option_value(key)
         end
       end
 
       def update_option(key, value)
+        @assigned_options << key
         @dsl_options[key] = value
+      end
+
+      def initial_option_value(key)
+        @config[key].dup
+      end
+
+      def unchanged_option?(key, value)
+        value == initial_option_value(key)
       end
 
       # Parse tags from various input formats and validate values

@@ -22,7 +22,10 @@ module Appsignal
           end
 
         begin
-          Appsignal.instrument "task.rake" do
+          Appsignal.instrument(
+            "task.rake",
+            :opentelemetry_scope => ["appsignal-ruby/rake", Appsignal::VERSION]
+          ) do
             super
           end
         rescue Exception => error
@@ -38,7 +41,7 @@ module Appsignal
             params, _ = args
             params = params.to_hash if params.respond_to?(:to_hash)
             transaction.set_action(name)
-            transaction.add_params_if_nil(params)
+            transaction.add_request_payload_if_nil(params)
             transaction.complete
           end
         end
@@ -47,7 +50,10 @@ module Appsignal
       private
 
       def _appsignal_create_transaction
-        Appsignal::Transaction.create("rake")
+        Appsignal::Transaction.create(
+          "rake",
+          :opentelemetry_scope => ["appsignal-ruby/rake", Appsignal::VERSION]
+        )
       end
     end
 

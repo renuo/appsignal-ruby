@@ -22,6 +22,11 @@ module Appsignal
     ERROR_CAUSES_LIMIT = 10
     # @!visibility private
     ERRORS_LIMIT = 10
+    # Guards the process-wide `add_params`/`set_params` deprecation warn-once
+    # flag, which transactions touch concurrently on threaded servers. A
+    # constant so it is created once at load time rather than lazily.
+    # @!visibility private
+    PARAMS_DEPRECATION_LOCK = Mutex.new
 
     # @return [Float]
     SAMPLING_RATE = ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f
@@ -31,8 +36,26 @@ module Appsignal
       # transaction.
       #
       # @param namespace [String] Namespace of the to be created transaction.
+      # @param opentelemetry_kind [Symbol] In collector mode, the OpenTelemetry
+      #   span kind: one of `:server`, `:consumer`, `:producer` or `:internal`.
+      #   Defaults to `:server`.
+      # @param opentelemetry_relationship [Symbol] In collector mode, how an
+      #   incoming `opentelemetry_context` relates to this transaction's span:
+      #   one of `:parent`, `:link`, `:both` or `:none`. Defaults to `:parent`.
+      # @param opentelemetry_context In collector mode, an incoming OpenTelemetry
+      #   trace context to relate this transaction's span to.
+      # @param opentelemetry_scope [Array(String, String)] In collector mode, the
+      #   OpenTelemetry instrumentation scope to record this transaction's spans
+      #   under, given as a `[name, version]` pair. Defaults to the AppSignal
+      #   scope.
       # @return [Transaction]
-      def create(namespace)
+      def create(
+        namespace,
+        opentelemetry_context: nil,
+        opentelemetry_scope: nil,
+        opentelemetry_kind: nil,
+        opentelemetry_relationship: nil
+      )
         # Reset the transaction if it was already completed but not cleared
         if Thread.current[:appsignal_transaction]&.completed?
           Thread.current[:appsignal_transaction] = nil
@@ -40,7 +63,15 @@ module Appsignal
 
         if Thread.current[:appsignal_transaction].nil?
           # If not, start a new transaction
-          set_current_transaction(Appsignal::Transaction.new(namespace))
+          set_current_transaction(
+            Appsignal::Transaction.new(
+              namespace,
+              :opentelemetry_context => opentelemetry_context,
+              :opentelemetry_scope => opentelemetry_scope,
+              :opentelemetry_kind => opentelemetry_kind,
+              :opentelemetry_relationship => opentelemetry_relationship
+            )
+          )
         else
           transaction = current
           # Otherwise, log the issue about trying to start another transaction
@@ -153,6 +184,26 @@ module Appsignal
 
       # @!visibility private
       attr_writer :last_errors
+
+      # Runs the block to emit the collector-mode `add_params`/`set_params`
+      # deprecation warning the first time it is called in the process, then
+      # stays quiet. The check-and-set is done under a lock so concurrent
+      # transactions on threaded runtimes don't race and warn more than once.
+      # @!visibility private
+      def warn_params_deprecation_once
+        should_warn = PARAMS_DEPRECATION_LOCK.synchronize do
+          next false if @params_deprecation_warned
+
+          @params_deprecation_warned = true
+        end
+        yield if should_warn
+      end
+
+      # @!visibility private
+      # Resets the warn-once state. Only used to keep test runs isolated.
+      def reset_params_deprecation_warning!
+        PARAMS_DEPRECATION_LOCK.synchronize { @params_deprecation_warned = false }
+      end
     end
 
     # @!visibility private
@@ -163,7 +214,15 @@ module Appsignal
     # @param namespace [String] Namespace of the to be created transaction.
     # @see create
     # @!visibility private
-    def initialize(namespace, id: SecureRandom.uuid, ext: nil)
+    def initialize( # rubocop:disable Metrics/ParameterLists
+      namespace,
+      id: SecureRandom.uuid,
+      backend: nil,
+      opentelemetry_context: nil,
+      opentelemetry_scope: nil,
+      opentelemetry_kind: nil,
+      opentelemetry_relationship: nil
+    )
       @transaction_id = id
       @action = nil
       @namespace = namespace
@@ -171,22 +230,55 @@ module Appsignal
       @discarded = false
       @completed = false
       @tags = {}
-      @breadcrumbs = []
       @store = Hash.new { |hash, key| hash[key] = {} }
+      # The distinct errors added to this transaction, in add order. Drives
+      # `last_errors`, the dedup check and the `ERRORS_LIMIT`, in both modes.
+      # A Set, so membership is by object identity (`eql?`/`hash`), matching how
+      # these errors used to be deduplicated as Hash keys. `Exception#==` would
+      # instead collapse distinct errors with the same class, message and
+      # backtrace, which we don't want.
+      @errors = Set.new
+      # Blocks per error, only populated in agent mode, where they run against
+      # the duplicate transactions at completion. Collector mode runs blocks
+      # when the error is added and never touches this.
       @error_blocks = Hash.new { |hash, key| hash[key] = [] }
       @is_duplicate = false
       @error_set = nil
 
-      @params = Appsignal::SampleData.new(:params)
       @session_data = Appsignal::SampleData.new(:session_data, Hash)
-      @headers = Appsignal::SampleData.new(:headers, Hash)
       @custom_data = Appsignal::SampleData.new(:custom_data)
 
-      @ext = ext || Appsignal::Extension.start_transaction(
+      @backend = backend || Appsignal::Backends.transaction.new(
         @transaction_id,
         @namespace,
-        0
-      ) || Appsignal::Extension::MockTransaction.new
+        :opentelemetry_context => opentelemetry_context,
+        :opentelemetry_scope => opentelemetry_scope,
+        :opentelemetry_kind => opentelemetry_kind,
+        :opentelemetry_relationship => opentelemetry_relationship
+      )
+
+      # The backend decides how the params channels are stored. Its
+      # `params_mapping` maps each logical channel to a storage bucket: the
+      # extension backend maps them all to one `:params` bucket, so agent mode
+      # keeps a single merged blob, while the OpenTelemetry backend keeps the
+      # request payload, function parameters and query parameters apart.
+      #
+      # Each distinct bucket gets its own `SampleData`, named after the bucket.
+      # That symbol is also the sample-data key the backend receives, so it can
+      # route the bucket to the right storage.
+      @params_mapping = @backend.params_mapping
+      @params_options = @backend.params_options
+      @params_buckets = @params_mapping.values.uniq.to_h do |bucket|
+        [bucket, Appsignal::SampleData.new(bucket)]
+      end
+
+      @headers_mapping = @backend.headers_mapping
+      @headers_allowlist = @backend.headers_allowlist
+      @headers_buckets = @headers_mapping.each_value.map(&:first).uniq.to_h do |bucket|
+        [bucket, Appsignal::SampleData.new(bucket, Hash)]
+      end
+
+      @channels_set = []
 
       run_after_create_hooks
     end
@@ -212,8 +304,13 @@ module Appsignal
     end
 
     # @!visibility private
-    # rubocop:disable Metrics/CyclomaticComplexity
     def complete
+      # Completing is idempotent: a transaction can be completed explicitly and
+      # then again by a `complete_current!` cleanup path. Re-running would, for a
+      # multi-error transaction, re-record the extra errors (a second duplicate
+      # in agent mode, or an event on an already-finished span in collector mode).
+      return if completed?
+
       if !error? && (rand > SAMPLING_RATE)
         pause!
         discard!
@@ -222,53 +319,41 @@ module Appsignal
       if discarded?
         Appsignal.internal_logger.debug "Skipping transaction '#{transaction_id}' " \
           "because it was manually discarded."
+        # Let the backend tear itself down. The agent backend drops the
+        # transaction (nothing is sent); the OpenTelemetry backend still
+        # finishes and exports the root span, but flags it with
+        # `appsignal.ignore_subtrace` so the collector ignores the subtrace.
+        # `@completed` stays false either way: a discarded transaction was
+        # never reported.
+        @backend.discard
         return
       end
 
-      # If the transaction is a duplicate, we don't want to finish it,
-      # because we want its finish time to be the finish time of the
-      # original transaction.
-      # Duplicate transactions should always be sampled, as we only
-      # create duplicates for errors, which are always sampled.
-      should_sample = true
+      begin
+        # If the transaction is a duplicate, we don't want to finish it,
+        # because we want its finish time to be the finish time of the
+        # original transaction.
+        # Duplicate transactions should always be sampled, as we only
+        # create duplicates for errors, which are always sampled.
+        should_sample = true
 
-      unless duplicate?
-        self.class.last_errors = @error_blocks.keys
-        should_sample = @ext.finish(0)
-      end
-
-      @error_blocks.each do |error, blocks|
-        # Ignore the error that is already set in this transaction.
-        next if error == @error_set
-
-        duplicate.tap do |transaction|
-          # In the duplicate transaction for each error, set an error
-          # with a block that calls all the blocks set for that error
-          # in the original transaction.
-          transaction.internal_set_error(error) do
-            blocks.each { |block| block.call(transaction) }
-          end
-
-          transaction.complete
+        unless duplicate?
+          self.class.last_errors = @errors.to_a
+          should_sample = @backend.finish
         end
+
+        report_errors
+
+        run_before_complete_hooks
+
+        sample_data if should_sample
+      ensure
+        # Release backend resources even when sample data cannot be collected
+        # or serialized. In collector mode this also detaches the span context.
+        @completed = true
+        @backend.complete
       end
-
-      if @error_set && @error_blocks[@error_set].any?
-        self.class.with_transaction(self) do
-          @error_blocks[@error_set].each do |block|
-            block.call(self)
-          end
-        end
-      end
-
-      run_before_complete_hooks
-
-      sample_data if should_sample
-
-      @completed = true
-      @ext.complete
     end
-    # rubocop:enable Metrics/CyclomaticComplexity
 
     # @!visibility private
     def pause!
@@ -343,6 +428,12 @@ module Appsignal
     end
 
     # @!visibility private
+    #
+    # True when an outer integration (Active Job) is already recording this
+    # enqueue. Nested integrations use it to skip their own enqueue event, but
+    # they must still propagate trace context: the outer integration's producer
+    # span is what the performing job links back to, and only the nested
+    # integration owns the carrier that job travels on.
     def job_enqueue_events_suppressed?
       store("job_enqueue")[:suppressed] == true
     end
@@ -366,17 +457,28 @@ module Appsignal
     # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
     #   Sample data guide
     def add_params(given_params = nil, &block)
-      @params.add(given_params, &block)
+      warn_params_deprecation
+      add_params_channel(:params, given_params, &block)
     end
     alias set_params add_params
 
+    # Marks every params channel as explicitly empty, so no parameters are
+    # reported for this transaction whatever their source.
+    #
+    # This is a deliberate choice for collector mode, where the request payload
+    # and the function parameters live in separate buckets: it empties both, not
+    # only the request payload the legacy `:params` channel maps to. Otherwise
+    # an integration's `_if_nil` setter could still add function parameters (a
+    # background job's arguments) after params were emptied, and the behavior
+    # would differ from agent mode, where all channels share one bucket.
+    #
     # @since 4.0.0
     # @return [void]
     # @!visibility private
     #
     # @see Helpers::Instrumentation#set_empty_params!
     def set_empty_params!
-      @params.set_empty_value!
+      @params_buckets.each_value(&:set_empty_value!)
     end
 
     # Add parameters to the transaction if not already set.
@@ -392,9 +494,118 @@ module Appsignal
     #
     # @see #add_params
     def add_params_if_nil(given_params = nil, &block)
-      add_params(given_params, &block) if !@params.value? && !@params.empty?
+      add_params(given_params, &block) if params_unset?(:params)
     end
     alias set_params_if_nil add_params_if_nil
+
+    # Add the request payload to the transaction.
+    #
+    # These are the parameters of an incoming request, such as the query string
+    # and the request body. In collector mode they map to the request payload
+    # attribute. In agent mode they are the transaction's params.
+    #
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    #
+    # @see #add_function_parameters
+    def add_request_payload(given_params = nil, &block)
+      add_params_channel(:request_payload, given_params, &block)
+    end
+
+    # Add the request payload to the transaction if not already set.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction if none are already set.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    # @!visibility private
+    #
+    # @see #add_request_payload
+    def add_request_payload_if_nil(given_params = nil, &block)
+      add_request_payload(given_params, &block) if params_unset?(:request_payload)
+    end
+
+    # Add the function parameters to the transaction.
+    #
+    # These are the arguments a background job or function was called with. In
+    # collector mode they map to the function parameters attribute. In agent
+    # mode they are the transaction's params.
+    #
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    #
+    # @see #add_request_payload
+    def add_function_parameters(given_params = nil, &block)
+      add_params_channel(:function_parameters, given_params, &block)
+    end
+
+    # Add the function parameters to the transaction if not already set.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction if none are already set.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    # @!visibility private
+    #
+    # @see #add_function_parameters
+    def add_function_parameters_if_nil(given_params = nil, &block)
+      add_function_parameters(given_params, &block) if params_unset?(:function_parameters)
+    end
+
+    # Add the query parameters to the transaction.
+    #
+    # These are the parameters parsed from an incoming request's query string.
+    # In collector mode they map to their own attribute, separate from the
+    # request payload and the function parameters. In agent mode they are the
+    # transaction's params.
+    #
+    # Behaves like {#add_params}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    #
+    # @see #add_request_payload
+    def add_query_parameters(given_params = nil, &block)
+      add_params_channel(:query_parameters, given_params, &block)
+    end
+
+    # Add the query parameters to the transaction if not already set.
+    #
+    # @param given_params [Hash<String, Object>, Array<Object>] The parameters to add to the
+    #   transaction if none are already set.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new parameters.
+    # @yieldreturn [Hash<String, Object>, Array<Object>]
+    # @return [void]
+    # @!visibility private
+    #
+    # @see #add_query_parameters
+    def add_query_parameters_if_nil(given_params = nil, &block)
+      add_query_parameters(given_params, &block) if params_unset?(:query_parameters)
+    end
 
     # Add tags to the transaction.
     #
@@ -462,6 +673,10 @@ module Appsignal
 
     # Add headers to the transaction.
     #
+    # @deprecated Use {#add_request_headers} for request headers and
+    #   {#add_request_environment} for the values a Rack environment holds that
+    #   are not request headers. This method takes both kinds at once, so it
+    #   has to work out which of them each value is.
     # @since 4.0.0
     # @param given_headers [Hash<String, Object>] A hash containing headers.
     # @yield This block is called when the transaction is sampled. The block's
@@ -473,7 +688,19 @@ module Appsignal
     # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
     #   Sample data guide
     def add_headers(given_headers = nil, &block)
-      @headers.add(given_headers, &block)
+      if block
+        headers, environment = Appsignal::Utils::RequestHeaders.split_lazily(&block)
+
+        add_headers_channel(:request_headers, &headers)
+        add_headers_channel(:request_environment, &environment)
+      elsif given_headers.is_a?(Hash)
+        headers, environment = Appsignal::Utils::RequestHeaders.split(given_headers)
+
+        add_headers_channel(:request_headers, headers)
+        add_headers_channel(:request_environment, environment)
+      else
+        add_headers_channel(:request_environment, given_headers)
+      end
     end
     alias set_headers add_headers
 
@@ -482,6 +709,8 @@ module Appsignal
     # When both the `given_headers` and a block is given to this method,
     # the block is leading and the argument will _not_ be used.
     #
+    # @deprecated Use {#add_request_headers_if_nil} or
+    #   {#add_request_environment_if_nil}.
     # @since 4.0.0
     # @param given_headers [Hash<String, Object>] A hash containing headers.
     # @yield This block is called when the transaction is sampled. The block's
@@ -494,9 +723,91 @@ module Appsignal
     # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
     #   Sample data guide
     def add_headers_if_nil(given_headers = nil, &block)
-      add_headers(given_headers, &block) unless @headers.value?
+      return if channel_set?(:request_headers) || channel_set?(:request_environment)
+
+      add_headers(given_headers, &block)
     end
     alias set_headers_if_nil add_headers_if_nil
+
+    # Add request headers to the transaction.
+    #
+    # Name each header the way OpenTelemetry names it, in lowercase and with
+    # dashes, such as `accept` and `content-length`. In agent mode the names
+    # are converted to the Rack spellings the environment uses, such as
+    # `HTTP_ACCEPT`.
+    #
+    # Behaves like {#add_headers}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    #
+    # @param given_headers [Hash<String, Object>] A hash containing request
+    #   headers.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new request headers.
+    # @yieldreturn [Hash<String, Object>]
+    # @return [void]
+    #
+    # @see #add_request_environment
+    # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
+    #   Sample data guide
+    def add_request_headers(given_headers = nil, &block)
+      add_headers_channel(:request_headers, given_headers, &block)
+    end
+
+    # Add request headers to the transaction if none are already set.
+    #
+    # @param given_headers [Hash<String, Object>] A hash containing request
+    #   headers to set if none are already set.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new request headers.
+    # @yieldreturn [Hash<String, Object>]
+    # @return [void]
+    # @!visibility private
+    #
+    # @see #add_request_headers
+    def add_request_headers_if_nil(given_headers = nil, &block)
+      add_request_headers(given_headers, &block) unless channel_set?(:request_headers)
+    end
+
+    # Add values from the request environment to the transaction.
+    #
+    # These are the values a Rack environment holds that are not request
+    # headers, such as `REMOTE_ADDR` and `QUERY_STRING`. Name each one the way
+    # Rack names it. Use {#add_request_headers} for the request headers.
+    #
+    # Behaves like {#add_headers}: merges when called multiple times, and a
+    # block takes precedence over the argument.
+    #
+    # @param given_environment [Hash<String, Object>] A hash containing request
+    #   environment values.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new request environment.
+    # @yieldreturn [Hash<String, Object>]
+    # @return [void]
+    #
+    # @see #add_request_headers
+    # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
+    #   Sample data guide
+    def add_request_environment(given_environment = nil, &block)
+      add_headers_channel(:request_environment, given_environment, &block)
+    end
+
+    # Add values from the request environment to the transaction if none are
+    # already set.
+    #
+    # @param given_environment [Hash<String, Object>] A hash containing request
+    #   environment values to set if none are already set.
+    # @yield This block is called when the transaction is sampled. The block's
+    #   return value will become the new request environment.
+    # @yieldreturn [Hash<String, Object>]
+    # @return [void]
+    # @!visibility private
+    #
+    # @see #add_request_environment
+    def add_request_environment_if_nil(given_environment = nil, &block)
+      return if channel_set?(:request_environment)
+
+      add_request_environment(given_environment, &block)
+    end
 
     # Add custom data to the transaction.
     #
@@ -534,14 +845,16 @@ module Appsignal
         return
       end
 
-      @breadcrumbs.push(
+      # The backend owns how breadcrumbs are stored: the agent backend buffers
+      # them and flushes at completion, the OpenTelemetry backend emits each as a
+      # span event right away (by completion its target span has finished).
+      @backend.add_breadcrumb(
         :time => time.to_i,
         :category => category,
         :action => action,
         :message => message,
         :metadata => metadata
       )
-      @breadcrumbs = @breadcrumbs.last(BREADCRUMB_LIMIT)
     end
 
     # Set an action name for the transaction.
@@ -558,7 +871,7 @@ module Appsignal
       return unless action
 
       @action = action
-      @ext.set_action(action)
+      @backend.set_action(action)
     end
 
     # Set an action name only if there is no current action set.
@@ -606,7 +919,7 @@ module Appsignal
       return unless namespace
 
       @namespace = namespace
-      @ext.set_namespace(namespace)
+      @backend.set_namespace(namespace)
     end
 
     # Set queue start time for transaction.
@@ -620,7 +933,7 @@ module Appsignal
     def set_queue_start(start)
       return unless start
 
-      @ext.set_queue_start(start)
+      @backend.set_queue_start(start)
     rescue RangeError
       Appsignal.internal_logger.warn("Queue start value #{start} is too big")
     end
@@ -630,12 +943,47 @@ module Appsignal
       return unless key && value
       return if Appsignal.config[:filter_metadata].include?(key.to_s)
 
-      @ext.set_metadata(key, value)
+      @backend.set_metadata(key, value)
+    end
+
+    # Add OpenTelemetry attributes to the span AppSignal is currently
+    # recording.
+    #
+    # In collector mode, AppSignal records a transaction as an OpenTelemetry
+    # span, and every instrumented event as a child span. This adds attributes
+    # to whichever of those spans is open right now: the innermost event
+    # started by {Appsignal::Helpers::Instrumentation#instrument}, or the
+    # transaction's own span when no event is open.
+    #
+    # Use this to describe what is being instrumented in OpenTelemetry's own
+    # terms, following the OpenTelemetry semantic conventions where they apply.
+    # Attributes have no equivalent outside collector mode, so this does
+    # nothing when collector mode is not active.
+    #
+    # @example Describing a database query
+    #   Appsignal.instrument("query.my_database") do
+    #     Appsignal::Transaction.current.add_opentelemetry_attributes(
+    #       "db.system.name" => "mysql"
+    #     )
+    #     run_the_query
+    #   end
+    #
+    # @param attributes [Hash<String, Object>, nil] Attributes to add to the
+    #   current span. Values that are not a String, Integer, Float or boolean
+    #   are converted to a String. Nothing is added when this is nil or empty.
+    # @return [void]
+    #
+    # @see https://opentelemetry.io/docs/specs/semconv/
+    #   OpenTelemetry semantic conventions
+    def add_opentelemetry_attributes(attributes = {})
+      return if attributes.nil? || attributes.empty?
+
+      @backend.set_attributes(attributes)
     end
 
     # @!visibility private
     # @see Appsignal::Helpers::Instrumentation#report_error
-    def add_error(error, &block)
+    def add_error(error, source: nil, &block)
       unless error.is_a?(Exception)
         Appsignal.internal_logger.error "Appsignal::Transaction#add_error: Cannot add error. " \
           "The given value is not an exception: #{error.inspect}"
@@ -645,10 +993,15 @@ module Appsignal
       return unless error
       return unless Appsignal.active?
 
-      if error.instance_variable_get(:@__appsignal_error_reported) && !@error_blocks.include?(error)
+      if error.instance_variable_get(:@__appsignal_error_reported) && !@errors.include?(error)
         return
       end
 
+      # Wrap the block here, at the entry point, so it stays protected wherever
+      # it later runs: right away in collector mode, or at completion in agent
+      # mode. `source` names the helper the block was given to, when known, so
+      # the log points the customer at the right call.
+      block = protect(source ? "the block passed to #{source}" : "the error block", &block) if block
       internal_set_error(error, &block)
 
       # Mark errors and their causes as tracked so we don't report duplicates,
@@ -663,10 +1016,13 @@ module Appsignal
 
     # @!visibility private
     # @see Helpers::Instrumentation#instrument
-    def start_event
+    def start_event(opentelemetry_kind: nil, opentelemetry_scope: nil)
       return if paused?
 
-      @ext.start_event(0)
+      @backend.start_event(
+        :opentelemetry_kind => opentelemetry_kind,
+        :opentelemetry_scope => opentelemetry_scope
+      )
     end
 
     # @!visibility private
@@ -674,98 +1030,290 @@ module Appsignal
     def finish_event(name, title, body, body_format = Appsignal::EventFormatter::DEFAULT)
       return if paused?
 
-      @ext.finish_event(
+      @backend.finish_event(
         name,
         title || BLANK,
         body || BLANK,
-        body_format || Appsignal::EventFormatter::DEFAULT,
-        0
+        body_format || Appsignal::EventFormatter::DEFAULT
       )
     end
 
     # @!visibility private
     # @see Helpers::Instrumentation#instrument
-    def record_event(name, title, body, duration, body_format = Appsignal::EventFormatter::DEFAULT)
+    def record_event( # rubocop:disable Metrics/ParameterLists
+      name,
+      title,
+      body,
+      duration,
+      body_format = Appsignal::EventFormatter::DEFAULT,
+      opentelemetry_kind: nil,
+      opentelemetry_scope: nil,
+      opentelemetry_attributes: nil
+    )
       return if paused?
 
-      @ext.record_event(
+      @backend.record_event(
         name,
         title || BLANK,
         body || BLANK,
         body_format || Appsignal::EventFormatter::DEFAULT,
         duration,
-        0
+        :opentelemetry_kind => opentelemetry_kind,
+        :opentelemetry_scope => opentelemetry_scope,
+        :opentelemetry_attributes => opentelemetry_attributes
       )
     end
 
     # @!visibility private
     # @see Helpers::Instrumentation#instrument
-    def instrument(name, title = nil, body = nil, body_format = Appsignal::EventFormatter::DEFAULT)
-      start_event
+    def instrument( # rubocop:disable Metrics/ParameterLists
+      name,
+      title = nil,
+      body = nil,
+      body_format = Appsignal::EventFormatter::DEFAULT,
+      opentelemetry_kind: nil,
+      opentelemetry_scope: nil
+    )
+      start_event(
+        :opentelemetry_kind => opentelemetry_kind,
+        :opentelemetry_scope => opentelemetry_scope
+      )
       yield if block_given?
+    rescue Exception => error
+      # The block raised, so the operation this event describes failed. Say what
+      # kind of failure it was, which the OpenTelemetry semantic conventions ask
+      # for. This runs before the `ensure` below finishes the event, so the
+      # attribute lands on the event's own span. The error itself is not reported
+      # here; whatever catches it decides that.
+      #
+      # A paused transaction never started an event span, so there would be no
+      # span of this event's to describe.
+      unless paused?
+        add_opentelemetry_attributes(
+          Appsignal::OpenTelemetry::ErrorType.attributes_for(error.class.name)
+        )
+      end
+
+      raise
     ensure
       finish_event(name, title, body, body_format)
     end
 
     # @!visibility private
     def to_h
-      JSON.parse(@ext.to_json)
+      JSON.parse(@backend.to_json)
     end
     alias to_hash to_h
 
     protected
 
     # @!visibility private
-    attr_writer :is_duplicate, :tags, :custom_data, :breadcrumbs, :params,
-      :session_data, :headers
+    attr_writer :is_duplicate, :tags, :custom_data, :params_buckets,
+      :session_data, :headers_buckets, :channels_set
 
     # @!visibility private
     def internal_set_error(error, &block)
-      _set_error(error) if @error_blocks.empty?
+      is_new_error = !@errors.include?(error)
 
-      if !@error_blocks.include?(error) && @error_blocks.length >= ERRORS_LIMIT
+      if is_new_error && @errors.length >= ERRORS_LIMIT
         Appsignal.internal_logger.warn "Appsignal::Transaction#add_error: Transaction has more " \
           "than #{ERRORS_LIMIT} distinct errors. Only the first " \
           "#{ERRORS_LIMIT} distinct errors will be reported."
         return
       end
-      @error_blocks[error] << block
-      @error_blocks[error].compact!
+
+      if @errors.empty?
+        _set_error(error)
+      elsif is_new_error && @backend.supports_multiple_errors?
+        # Record additional errors immediately so each exception event lands on
+        # the span current now, not the root span at completion. The agent
+        # backend instead reports extras as duplicate transactions.
+        _send_error_to_backend(error)
+      end
+
+      @errors.add(error)
+
+      if @backend.supports_multiple_errors?
+        # Collector mode: the error is already recorded, so run its block now
+        # rather than at completion. Anything a block attaches to the current
+        # span -- breadcrumbs, nested errors, custom instrumentation -- then
+        # lands where the error was reported, not on the root span at
+        # completion.
+        if block
+          self.class.with_transaction(self) do
+            block.call(self)
+          end
+        end
+      else
+        @error_blocks[error] << block
+        @error_blocks[error].compact!
+      end
     end
 
     private
 
-    attr_reader :breadcrumbs
+    # The `SampleData` bucket a logical params channel is stored in, per the
+    # backend's `params_mapping`. In agent mode every channel resolves to the
+    # same `:params` bucket (so they merge and share an `_if_nil` guard); in
+    # collector mode the request payload, function parameters and query
+    # parameters resolve to separate buckets. `fetch` raises if a backend's
+    # mapping omits a channel.
+    def params_data(channel)
+      @params_buckets.fetch(@params_mapping.fetch(channel))
+    end
 
+    PARAMS_CHANNEL_ALIASES = { :params => :request_payload }.freeze
+    private_constant :PARAMS_CHANNEL_ALIASES
+
+    def params_channel(channel)
+      PARAMS_CHANNEL_ALIASES.fetch(channel, channel)
+    end
+
+    def add_params_channel(channel, given_params = nil, &block)
+      sample = params_data(channel)
+      sample.add(given_params, &block)
+      mark_channel_set(params_channel(channel)) if sample.value?
+    end
+
+    def params_unset?(channel)
+      !channel_set?(params_channel(channel)) && !params_data(channel).empty?
+    end
+
+    # `add_params`/`set_params` don't say whether the params are a request
+    # payload or function parameters, so in collector mode they always map to
+    # the request payload. Warn once per process to nudge callers toward the
+    # explicit methods.
+    def warn_params_deprecation
+      return unless Appsignal.config&.collector_mode?
+
+      Appsignal::Transaction.warn_params_deprecation_once do
+        Appsignal::Utils::StdoutAndLoggerMessage.warning(
+          "`add_params`/`set_params` is deprecated in collector mode. Use " \
+            "`add_request_payload` or `add_function_parameters` instead, or " \
+            "`add_custom_data` for data that is neither."
+        )
+      end
+    end
+
+    # Wrap a block handed to the transaction by user code so that, wherever it
+    # later runs, a failure is logged and swallowed instead of breaking the
+    # transaction lifecycle. A raise would otherwise skip the rest of creation or
+    # completion, including the backend teardown that detaches the transaction's
+    # OpenTelemetry context, which would then become the parent of the next
+    # request's spans on that thread. Re-raising is wrong because the block runs
+    # far from where its caller defined it.
+    #
+    # Returns `nil` when no block is given, so it can wrap an optional block.
+    def protect(description, &block)
+      return unless block
+
+      proc do |*args|
+        block.call(*args)
+      rescue => error
+        location = block.source_location&.join(":") || "an unknown location"
+        Appsignal.internal_logger.error(
+          "Error in #{description}, defined at #{location}: " \
+            "#{error.class}: #{error.message}\n#{error.backtrace&.join("\n")}"
+        )
+      end
+    end
+
+    # Hooks are registered both as blocks and as method objects pushed onto the
+    # set directly, so there is no single entry point to wrap them at. They are
+    # protected here instead, at the one place that runs all of them.
     def run_after_create_hooks
       self.class.after_create.each do |block|
-        block.call(self)
+        protect("the after_create hook", &block).call(self)
       end
     end
 
     def run_before_complete_hooks
       self.class.before_complete.each do |block|
-        block.call(self, @error_set)
+        protect("the before_complete hook", &block).call(self, @error_set)
+      end
+    end
+
+    # Reports the errors stored on the transaction at completion.
+    #
+    # In eager (collector) mode nothing is left to do: each error was recorded
+    # and its block run when the error was added. In deferred (agent) mode the
+    # extension holds a single error, so the primary error's blocks run on this
+    # transaction and every additional error is reported as a duplicate
+    # transaction.
+    def report_errors
+      return if @backend.supports_multiple_errors?
+
+      report_errors_as_duplicates
+    end
+
+    # Agent-only legacy path. The extension transaction holds a single error, so
+    # extra errors are reported as duplicate transactions. This whole method
+    # disappears once agent mode is dropped: collector mode records every error
+    # eagerly and leaves nothing to do at completion.
+    def report_errors_as_duplicates
+      @errors.each do |error|
+        # Ignore the error that is already set in this transaction.
+        next if error == @error_set
+
+        duplicate.tap do |transaction|
+          # In the duplicate transaction for each error, set an error
+          # with a block that calls all the blocks set for that error
+          # in the original transaction. Those blocks were already wrapped
+          # when they were added, so they are called directly here.
+          transaction.internal_set_error(error) do
+            @error_blocks[error].each do |block|
+              block.call(transaction)
+            end
+          end
+
+          transaction.complete
+        end
+      end
+
+      return unless @error_set && @error_blocks[@error_set].any?
+
+      self.class.with_transaction(self) do
+        @error_blocks[@error_set].each do |block|
+          block.call(self)
+        end
       end
     end
 
     def _set_error(error)
-      backtrace = cleaned_backtrace(error.backtrace)
-      @ext.set_error(
+      @error_set = error
+      _send_error_to_backend(error)
+    end
+
+    # Records an error on the backend. The cause chain is walked once into
+    # neutral data ({name, message, backtrace}); each backend projects what it
+    # needs -- the agent's first-line `error_causes` sample data, or the
+    # OpenTelemetry `appsignal.error_causes` attribute. Called for the first
+    # error and, in collector mode, for each additional error as it is added.
+    def _send_error_to_backend(error)
+      causes, root_cause_missing = _error_causes(error)
+      @backend.set_error(
         error.class.name,
         cleaned_error_message(error),
-        backtrace ? Appsignal::Utils::Data.generate(backtrace) : Appsignal::Extension.data_array_new
+        cleaned_backtrace(error.backtrace),
+        causes.map do |cause|
+          {
+            :name => cause.class.name,
+            :message => cleaned_error_message(cause),
+            :backtrace => cleaned_backtrace(cause.backtrace)
+          }
+        end,
+        root_cause_missing
       )
-      @error_set = error
+    end
 
+    # Walks the `error.cause` chain (without mutating `error`), collecting up to
+    # `ERROR_CAUSES_LIMIT` causes. Returns the causes and whether the chain was
+    # truncated (the root cause is missing).
+    def _error_causes(error)
       root_cause_missing = false
-
       causes = []
-      while error
-        error = error.cause
-
-        break unless error
-
+      cause = error
+      while (cause = cause.cause)
         if causes.length >= ERROR_CAUSES_LIMIT
           Appsignal.internal_logger.debug "Appsignal::Transaction#add_error: Error has more " \
             "than #{ERROR_CAUSES_LIMIT} error causes. Only the first #{ERROR_CAUSES_LIMIT} " \
@@ -774,55 +1322,10 @@ module Appsignal
           break
         end
 
-        causes << error
+        causes << cause
       end
 
-      causes_sample_data = causes.map do |e|
-        {
-          :name => e.class.name,
-          :message => cleaned_error_message(e),
-          :first_line => first_formatted_backtrace_line(e)
-        }
-      end
-
-      causes_sample_data.last[:is_root_cause] = false if root_cause_missing
-
-      set_sample_data(
-        "error_causes",
-        causes_sample_data
-      )
-    end
-
-    BACKTRACE_REGEX =
-      %r{(?<gem>[\w-]+ \(.+\) )?(?<path>:?/?\w+?.+?):(?<line>:?\d+)(?::in `(?<method>.+)')?$}.freeze
-    private_constant :BACKTRACE_REGEX
-
-    def first_formatted_backtrace_line(error)
-      backtrace = cleaned_backtrace(error.backtrace)
-      first_line = backtrace&.first
-      return unless first_line
-
-      captures = BACKTRACE_REGEX.match(first_line)
-      return unless captures
-
-      captures.named_captures
-        .merge("original" => first_line)
-        .tap do |c|
-          config = Appsignal.config
-          # Strip of whitespace at the end of the gem name
-          c["gem"] = c["gem"]&.strip
-          # Strip the app path from the path if present
-          root_path = config.root_path
-          if c["path"].start_with?(root_path)
-            c["path"].delete_prefix!(root_path)
-            # Relative paths shouldn't start with a slash
-            c["path"].delete_prefix!("/")
-          end
-          # Add revision for linking to the repository from the UI
-          c["revision"] = config[:revision]
-          # Convert line number to an integer
-          c["line"] = c["line"].to_i
-        end
+      [causes, root_cause_missing]
     end
 
     def set_sample_data(key, data)
@@ -835,10 +1338,11 @@ module Appsignal
         return
       end
 
-      @ext.set_sample_data(
-        key.to_s,
-        Appsignal::Utils::Data.generate(data)
-      )
+      # Pass raw Ruby through to the backend. ExtensionBackend serializes to a
+      # C-extension `Data` object; OpenTelemetryBackend reads the Hash/Array
+      # directly. The `RuntimeError` rescue still covers ExtensionBackend's
+      # `Data.generate`, which now runs inside the backend call.
+      @backend.set_sample_data(key.to_s, data)
     rescue RuntimeError => e
       begin
         inspected_data = data.inspect
@@ -853,15 +1357,24 @@ module Appsignal
     end
 
     def sample_data
-      {
-        :params => sanitized_params,
-        :environment => sanitized_request_headers,
+      data = {}
+      @headers_buckets.each do |bucket, sample|
+        data[bucket] = sanitized_headers(bucket, sample)
+      end
+      data.merge!(
         :session_data => sanitized_session_data,
         :tags => sanitized_tags,
-        :breadcrumbs => breadcrumbs,
         :custom_data => custom_data
-      }.each do |key, data|
-        set_sample_data(key, data)
+      )
+      # Each params bucket is emitted under its own key. The extension backend
+      # has a single `:params` bucket; the OpenTelemetry backend has separate
+      # `:request_payload` and `:function_parameters` buckets. The backend maps
+      # each key to its storage (C-extension slot or OpenTelemetry attribute).
+      @params_buckets.each do |bucket, sample|
+        data[bucket] = sanitized_params(bucket, sample)
+      end
+      data.each do |key, value|
+        set_sample_data(key, value)
       end
     end
 
@@ -870,30 +1383,40 @@ module Appsignal
       self.class.new(
         namespace,
         :id => new_transaction_id,
-        :ext => @ext.duplicate(new_transaction_id)
+        :backend => @backend.duplicate(new_transaction_id)
       ).tap do |transaction|
         transaction.is_duplicate = true
         transaction.tags = @tags.dup
         transaction.custom_data = @custom_data.dup
-        transaction.breadcrumbs = @breadcrumbs.dup
-        transaction.params = @params.dup
+        transaction.params_buckets = @params_buckets.transform_values(&:dup)
         transaction.session_data = @session_data.dup
-        transaction.headers = @headers.dup
+        transaction.headers_buckets = @headers_buckets.transform_values(&:dup)
+        transaction.channels_set = @channels_set.dup
       end
     end
 
     def params
-      @params.value
-    rescue => e
-      Appsignal.internal_logger.error("Exception while fetching params: #{e.class}: #{e}")
-      nil
+      params_value(params_data(:params))
     end
 
-    def sanitized_params
-      return unless Appsignal.config[:send_params]
+    def sanitized_params(bucket, sample)
+      options = @params_options.fetch(bucket)
+      return if Appsignal.config[options.fetch(:send)] == false
 
-      filter_keys = Appsignal.config[:filter_parameters] || []
-      Appsignal::Utils::SampleDataSanitizer.sanitize(params, filter_keys)
+      filter_keys = Appsignal.config[options.fetch(:filter)] || []
+      Appsignal::Utils::SampleDataSanitizer.sanitize(params_value(sample), filter_keys)
+    end
+
+    # Reads a params bucket's value. Evaluating it runs any block the caller
+    # passed to `add_params`/`add_request_payload`/`add_function_parameters`,
+    # which is user code that can raise, so a failure is logged and swallowed.
+    def params_value(sample)
+      sample.value
+    rescue => e
+      Appsignal.internal_logger.error(
+        "Exception while fetching params (#{sample.key}): #{e.class}: #{e}"
+      )
+      nil
     end
 
     def session_data
@@ -922,29 +1445,63 @@ module Appsignal
       )
     end
 
-    def request_headers
-      @headers.value
+    def add_headers_channel(channel, given_headers = nil, &block)
+      bucket, transform = @headers_mapping.fetch(channel)
+      sample = @headers_buckets.fetch(bucket)
+
+      if transform.nil?
+        sample.add(given_headers, &block)
+      elsif block
+        sample.add { transform_headers(transform, block.call) }
+      else
+        sample.add(transform_headers(transform, given_headers))
+      end
+
+      mark_channel_set(channel) if sample.value?
+    end
+
+    def transform_headers(transform, headers)
+      return headers unless headers.is_a?(Hash)
+
+      headers.to_h(&transform)
+    end
+
+    def mark_channel_set(channel)
+      @channels_set << channel unless @channels_set.include?(channel)
+    end
+
+    def channel_set?(channel)
+      @channels_set.include?(channel)
+    end
+
+    def headers_value(sample)
+      sample.value
     rescue => e
       Appsignal.internal_logger.error \
         "Exception while fetching headers: #{e.class}: #{e}"
       nil
     end
 
-    # Returns sanitized environment for a transaction.
-    #
-    # The environment of a transaction can contain a lot of information, not
-    # all of it useful for debugging.
-    #
-    # @return [nil] if no environment is present.
-    # @return [Hash<String, Object>]
-    def sanitized_request_headers
-      headers = request_headers
+    def sanitized_headers(bucket, sample)
+      headers = headers_value(sample)
       return unless headers
 
+      option, header_names = @headers_allowlist.fetch(bucket)
+      allowlist = Appsignal.config[option]
+
+      headers = normalized_headers(headers) if header_names
+
       {}.tap do |out|
-        Appsignal.config[:request_headers].each do |key|
+        allowlist.each do |key|
+          key = Appsignal::Utils::RequestHeaders.normalize(key) if header_names
           out[key] = headers[key] if headers[key]
         end
+      end
+    end
+
+    def normalized_headers(headers)
+      headers.to_h do |key, value|
+        [Appsignal::Utils::RequestHeaders.normalize(key), value]
       end
     end
 

@@ -1,5 +1,412 @@
 # AppSignal for Ruby gem Changelog
 
+## 5.0.5
+
+_Published on 2026-10-14._
+
+### Added
+
+- Automatically detect the application's revision from the `HEROKU_BUILD_COMMIT`
+  environment variable, which is set by Heroku at build time [when the
+  `runtime-dyno-build-metadata` Heroku Labs
+  feature](https://devcenter.heroku.com/articles/dyno-metadata) is enabled.
+
+  (patch [ab022837](https://github.com/appsignal/appsignal-ruby/commit/ab022837c17b85dcd213fde755ae456231fdba9a))
+- Automatically detect the application's revision from the `HEROKU_BUILD_COMMIT`
+  environment variable, which is set by Heroku at build time [when the
+  `runtime-dyno-build-metadata` Heroku Labs
+  feature](https://devcenter.heroku.com/articles/dyno-metadata) is enabled.
+
+  (patch [6fb3cd87](https://github.com/appsignal/appsignal-ruby/commit/6fb3cd872ad9e3950fa12772f02fbab98fa6cce5))
+
+## 5.0.4
+
+_Published on 2026-10-09._
+
+### Fixed
+
+- Fix an issue where transactions would be reused across requests when an error happened before the transaction could be closed, which would lead to errors being returned by the app itself. (patch [65ff0be0](https://github.com/appsignal/appsignal-ruby/commit/65ff0be0c3d4dea2eb9ed5bdb81004e899e6edf4))
+
+## 5.0.3
+
+_Published on 2026-10-08._
+
+### Fixed
+
+- In collector mode, report counter metrics correctly from processes forked after AppSignal starts, such as Puma workers when using `preload_app!`. Before this change, applications running several forked processes would lose data points or report incorrect values for them. (patch [4e5a3e78](https://github.com/appsignal/appsignal-ruby/commit/4e5a3e781b4ce2b2620b172a15198a2a59e0ebee))
+
+## 5.0.2
+
+_Published on 2026-10-06._
+
+### Changed
+
+- Use the revision set by Heroku, Render, Kamal or Scalingo when the application also has a `REVISION` file. Since version 4.6.0, a `REVISION` file took precedence over the `HEROKU_SLUG_COMMIT`, `RENDER_GIT_COMMIT`, `KAMAL_VERSION` and `CONTAINER_VERSION` environment variables, so an application that kept a placeholder `REVISION` file in source control reported that placeholder as its revision. The `revision` config option and the `APP_REVISION` environment variable still take precedence over both.
+
+  Thanks to @rmm5t for their contribution!
+
+  (patch [bc14ef9c](https://github.com/appsignal/appsignal-ruby/commit/bc14ef9c6db3de71bf2ca8f23ad088f29294c0ff))
+
+## 5.0.1
+
+_Published on 2026-10-02._
+
+### Added
+
+- In collector mode, also report the `response_status` counter with a `service` tag. Response statuses can then be graphed per service when several services report to one app. (patch [51981add](https://github.com/appsignal/appsignal-ruby/commit/51981add4c006403b0afddab78cfb608a32ec2c3))
+
+### Fixed
+
+- Improve handling of the extension internal queue when full. (patch [78123581](https://github.com/appsignal/appsignal-ruby/commit/7812358175fc1e591e7f29026cd16df6db70e589))
+- Fix issues in the extension that lead to gaps in data reporting. (patch [f3c72857](https://github.com/appsignal/appsignal-ruby/commit/f3c72857a00e3fb4ad8b9760f53d14a85fb32ed2))
+- In collector mode, report allocation counts and queue durations per service and namespace. This fixes an issue where these metrics were reported by namespace alone, causing the "Performance" > "Allocations" page to link to performance pages that did not exist. (patch [51981add](https://github.com/appsignal/appsignal-ruby/commit/51981add4c006403b0afddab78cfb608a32ec2c3))
+
+## 5.0.0
+
+_Published on 2026-09-28._
+
+### Changed
+
+- Release the final package version. See the pre-release changelog entries for the changes in this version. (major)
+
+## 5.0.0.rc.2
+
+_Published on 2026-09-23._
+
+This release also includes all the changes from AppSignal for Ruby version 4.10.4 and below.
+
+### Added
+
+- Detect the revision that is being deployed from the environment variables set by Heroku, Render, Kamal and Scalingo: `HEROKU_SLUG_COMMIT`, `RENDER_GIT_COMMIT`, `KAMAL_VERSION` and `CONTAINER_VERSION`. Applications deployed on those platforms now report their revision without setting the `revision` configuration option.
+
+  This affects collector mode, where deploys were reported as `unknown` when the revision was not configured.
+
+  (patch [bf606432](https://github.com/appsignal/appsignal-ruby/commit/bf606432aab96d3f9b3a20cbb4b0c48aa7748702))
+- Detect the hostname of the machine the application runs on. On Heroku this is the name of the dyno, and everywhere else it is the name the host reports for itself. Set the `hostname` configuration option to report a different name.
+
+  This affects collector mode, where all data was reported for a host named `unknown` when the hostname was not configured.
+
+  (patch [bf606432](https://github.com/appsignal/appsignal-ruby/commit/bf606432aab96d3f9b3a20cbb4b0c48aa7748702))
+- Report the host, the port and the HTTP version of an incoming web request in collector mode. These are sent as the `server.address`, `server.port` and `network.protocol.version` OpenTelemetry attributes. The host is read from the `Forwarded` and `X-Forwarded-Host` headers when a proxy sets them, so it is the host the client used rather than the one the proxy connected to. (patch [85460ff3](https://github.com/appsignal/appsignal-ruby/commit/85460ff3d8ae5235515fe291b9a6baea6ad0c47c))
+- Report the request environment in collector mode. The `request_headers` configuration option is an allowlist of Rack environment names, and some of those names are not request headers. Those values are now reported as `appsignal.environment.*` OpenTelemetry attributes and shown in the request's Environment panel, instead of being left out.
+
+  Values that describe the request itself are not repeated there, because they are already reported as the request's method, path, host, port and protocol version.
+
+  (patch [85460ff3](https://github.com/appsignal/appsignal-ruby/commit/85460ff3d8ae5235515fe291b9a6baea6ad0c47c))
+- Add the `keep_request_headers` and `keep_request_environment` configuration options, which are used in collector mode. They replace `request_headers`, which is deprecated in collector mode.
+
+  `keep_request_headers` lists the request headers to report, using the names OpenTelemetry uses for them, such as `accept` and `content-length`. `keep_request_environment` lists the Rack environment values to report that are not request headers, using the names Rack uses for them, such as `REMOTE_ADDR`.
+
+  Both options default to a value derived from `request_headers`, which lists Rack environment keys and mixes the two kinds together. So an application that only ever set `request_headers` keeps reporting the same values when it moves to collector mode.
+
+  The `request_headers` configuration option is deprecated in collector mode, and a warning will be emitted at startup, containing the values of `keep_request_headers` and `keep_request_environment` that should be used to replace it.
+
+  In agent mode, `request_headers` still lists every Rack environment key to report, and the two new options have no effect.
+
+  (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+- Add the `Appsignal.add_request_headers` and `Appsignal.add_request_environment` helpers.
+
+  Use `add_request_headers` to report request headers, naming each header in lowercase and with dashes, such as `content-length`. Use `add_request_environment` to report the values a Rack environment holds that are not request headers, naming each one the way Rack names it, such as `REMOTE_ADDR`.
+
+  In agent mode, both write to the "Environment" sample data, formatted as Rack environment keys. In collector mode, they write different span attributes.
+
+  Together they replace `Appsignal.add_headers`, which is now deprecated, as it accepts Rack environment keys and works out which ones are headers.
+
+  (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+- Report request headers for Webmachine applications. (patch [fcfb7a0d](https://github.com/appsignal/appsignal-ruby/commit/fcfb7a0d2545a2144aa61efa61d445c0e11c7749), [b47f5bd2](https://github.com/appsignal/appsignal-ruby/commit/b47f5bd2b4611f5a6089bff28f91d47eac94422f), [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+
+### Changed
+
+- Report `app` instead of `unknown` as the OpenTelemetry service name when the `service_name` configuration option is not set and collector mode is in use. (patch [7078181c](https://github.com/appsignal/appsignal-ruby/commit/7078181ccfc5aa5bb1200d99aa7c612c5acbbd00))
+- The `filter_parameters` and `send_params` configuration options are deprecated in collector mode. Use `filter_request_payload`, `filter_function_parameters` and `filter_request_query_parameters` to filter different kinds of parameters, and `send_request_payload`, `send_request_query_parameters` and `send_function_parameters` to choose which kinds of parameters to report.
+
+  In collector mode, each kind of parameter is now filtered and reported according to its own options, and the deprecated options' values are only used to fill in values when the new options are unset. AppSignal logs which values to set to keep reporting what it reports now.
+
+  In agent mode, `filter_parameters` and `send_params` still apply to every kind of parameter, and the new options have no effect.
+
+  (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+
+### Fixed
+
+- The `ignore_logs` option now filters out the log lines that match its patterns in collector mode. (patch [bf606432](https://github.com/appsignal/appsignal-ruby/commit/bf606432aab96d3f9b3a20cbb4b0c48aa7748702))
+- In collector mode, backtrace lines from your own application are now shown as paths relative to your application's root, and are recognized as your application's code. (patch [bf606432](https://github.com/appsignal/appsignal-ruby/commit/bf606432aab96d3f9b3a20cbb4b0c48aa7748702))
+- The `ca_file_path` and `http_proxy` options now apply to the data sent to the collector in collector mode. Before this change they only applied to the data sent by the agent, so a custom certificate authority file or a proxy had no effect in collector mode. (patch [e99c6b68](https://github.com/appsignal/appsignal-ruby/commit/e99c6b689b20fb433ecdcdc9fb8c6173e1ea8cda))
+- Remove an incorrect warning about the `filter_metadata` configuration option being ignored in collector mode. (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+- Report request headers in collector mode. (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+- Report no response headers in collector mode until the `response_headers` configuration option names some. The option had no effect at all, so every response header captured by the application's own OpenTelemetry instrumentation was reported whatever the option said. (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+- Read an array configuration option written as a null in `config/appsignal.yml` as the empty list it means. Options such as `filter_parameters` and `ignore_actions` raised a `NoMethodError` when AppSignal started, and `filter_metadata` and `filter_session_data` raised one while a transaction was sampled. (patch [992a60c8](https://github.com/appsignal/appsignal-ruby/commit/992a60c8d0f68b3edcb00150a1e9f14985619a4f))
+
+## 4.10.4
+
+_Published on 2026-09-22._
+
+### Fixed
+
+- Start AppSignal before the Rails application's initializers run. Depending on
+  the order in which gems were loaded, AppSignal could start after
+  `config/initializers`. In those applications `Appsignal.active?` returned
+  `false` inside an initializer, errors raised by initializers were not reported,
+  and with `config.appsignal.start_at = :after_initialize` the Rails defaults for
+  `log_path` and `ignore_actions` were not applied.
+
+  (patch [523d8458](https://github.com/appsignal/appsignal-ruby/commit/523d845879cfe8cc6306bdc24d51f88ad979f714))
+
+## 4.10.3
+
+_Published on 2026-09-10._
+
+### Fixed
+
+- Fix the sanitization of function arguments in SQL statements.
+
+  Before this release, SQL sanitization of function arguments stripped out parts of the SQL statement after the function argument list.
+
+  (patch [74f509b0](https://github.com/appsignal/appsignal-ruby/commit/74f509b0e8438140bab79a5189c2ed421bbbdf6d))
+
+## 3.13.2
+
+_Published on 2026-09-09._
+
+### Changed
+
+- Update the agent to handle high traffic apps. On high-traffic apps that would exceed the maximum accepted internal payload size, send data to the Push API more frequently. (patch [c69fbf57](https://github.com/appsignal/appsignal-ruby/commit/c69fbf57242b13c86af2196baae8f295285de947))
+- Update the agent from version 0.35.19 to version 0.37.0. The 3.x series of the Ruby gem was several agent releases behind, so this update also brings the improvements from every agent release in between. Those include better sanitisation of SQL queries, host metric collection that keeps working when a disk mount is frozen, and no more leftover `[timeout]` processes on Alpine Linux containers. (patch [c69fbf57](https://github.com/appsignal/appsignal-ruby/commit/c69fbf57242b13c86af2196baae8f295285de947))
+
+### Fixed
+
+- Fix events showing as unknown in long-running applications. An application process that kept running for thirty days without restarting could lose the names and queries of the events it recorded, both in slow traces and in the "Slow events" panel. (patch [c69fbf57](https://github.com/appsignal/appsignal-ruby/commit/c69fbf57242b13c86af2196baae8f295285de947))
+- Prevent `gc` events from appearing in the "Slow events" panel. (patch [c69fbf57](https://github.com/appsignal/appsignal-ruby/commit/c69fbf57242b13c86af2196baae8f295285de947))
+
+## 4.10.2
+
+_Published on 2026-09-09._
+
+### Added
+
+- Add support for Grape 4. On Grape 4, every request through a Grape API raised a `NoMethodError`. Applications on Grape 3 and below were not affected.
+
+  On Grape 4, the action name and the reported path now describe the endpoint's full route, so they include the API prefix, the path version and the mount point. They also no longer end in a trailing slash when the endpoint declares no path of its own, so an endpoint reported as `GET::My::Api#/users/:id/` is now reported as `GET::My::Api#/users/:id`. Action names on Grape 3 and below do not change.
+
+  (patch [bdea5c1b](https://github.com/appsignal/appsignal-ruby/commit/bdea5c1b6f02c902d0ba195eff3544545bee2547))
+
+### Changed
+
+- Update the agent to handle high traffic apps. On high-traffic apps that would exceed the maximum accepted internal payload size, send data to the Push API more frequently. (patch [a1c3033e](https://github.com/appsignal/appsignal-ruby/commit/a1c3033e1b255371a2d71d4519506a67dbfa2b82))
+
+### Fixed
+
+- Load the host Rails application before the `appsignal demo` command reads the
+  AppSignal configuration. This matches the behavior of `appsignal diagnose`.
+
+  Thanks [@Guflly](https://github.com/Guflly) for your contribution!
+
+  (patch [3249a376](https://github.com/appsignal/appsignal-ruby/commit/3249a376a6fb7a10c990e0f49f7907dc40b03a12))
+- Fix events showing as unknown in long-running applications. An application process that kept running for thirty days without restarting could lose the names and queries of the events it recorded, both in slow traces and in the "Slow events" panel. (patch [a1c3033e](https://github.com/appsignal/appsignal-ruby/commit/a1c3033e1b255371a2d71d4519506a67dbfa2b82))
+- Prevent `gc` events from appearing in the "Slow events" panel. (patch [a1c3033e](https://github.com/appsignal/appsignal-ruby/commit/a1c3033e1b255371a2d71d4519506a67dbfa2b82))
+- Report Delayed Job jobs that fail to load. Before this change, a job whose
+  payload could not be deserialized was not reported to AppSignal at all.
+
+  This can happen when a deploy removes or renames a job class while jobs of that
+  class are still queued. Those jobs are now reported as failed, with the
+  `Delayed::DeserializationError` they raised, and are named after the class
+  recorded in the job's handler. When even that cannot be read, they are named
+  `DelayedJobInternal`.
+
+  (patch [ea294440](https://github.com/appsignal/appsignal-ruby/commit/ea29444069ef78347ad1e8266869b7d9aa2caa50))
+- Record a single event for a bulk enqueue of Active Job jobs. Before this change,
+  enqueuing jobs with `ActiveJob.perform_all_later` would record an event for the
+  batch and, if the adapter was instrumented with AppSignal, another event for each
+  job in it. A job that slices a large collection and enqueues it in batches was
+  therefore reported with an event per job enqueued, where before version 4.9.0 it
+  had one event per batch.
+
+  A bulk enqueue is now recorded as a single `enqueue_all.active_job` event, named
+  after the job class when every job in the batch shares one.
+
+  (patch [fe82dc60](https://github.com/appsignal/appsignal-ruby/commit/fe82dc60bc8b52d466c0c9b673adbae29f79449e))
+
+## 5.0.0.rc.1
+
+_Published on 2026-08-21._
+
+### Added
+
+- Add a `collector_endpoint` configuration option (`APPSIGNAL_COLLECTOR_ENDPOINT` environment variable) that puts the integration in _collector mode_. In collector mode AppSignal reports traces, metrics and logs to an AppSignal Collector, over OTLP/HTTP.
+
+  Collector mode requires Ruby 3.1 or newer, and the OpenTelemetry gems, which are not installed by default. Add the `appsignal-opentelemetry` gem alongside `appsignal` to install them. When they are missing or too old, AppSignal logs a warning and keeps reporting through its agent.
+
+  (major [84d83b65](https://github.com/appsignal/appsignal-ruby/commit/84d83b657d65a93859ba73f295216a3b0ee9cab1), [90768626](https://github.com/appsignal/appsignal-ruby/commit/9076862677444c7772e6f8fbe1e3d5a646a4849d))
+- Add configuration options that map to OpenTelemetry resource attributes in collector mode: `service_name`, `filter_attributes`, `filter_function_parameters`, `filter_request_query_parameters`, `filter_request_payload`, `response_headers`, `send_function_parameters`, `send_request_query_parameters` and `send_request_payload`.
+
+  In collector mode, existing options are passed to the collector as resource attributes as well: `name`, environment, `hostname`, `revision`, `ignore_actions`, `ignore_errors`, `ignore_namespaces`, `request_headers`, `filter_session_data` and `send_session_data`.
+
+  Setting any of these without `collector_endpoint`, or setting `filter_parameters`, `filter_metadata` or `send_params` with it, logs a warning at startup.
+
+  (minor [84d83b65](https://github.com/appsignal/appsignal-ruby/commit/84d83b657d65a93859ba73f295216a3b0ee9cab1), [90768626](https://github.com/appsignal/appsignal-ruby/commit/9076862677444c7772e6f8fbe1e3d5a646a4849d))
+
+## 4.10.1
+
+_Published on 2026-08-20._
+
+### Fixed
+
+- Use the CA certificate configured in `APPSIGNAL_CA_FILE_PATH` to download the
+  AppSignal agent when installing this gem.
+
+  The gem downloads the agent from our servers over HTTPS during installation. It
+  always used the CA certificate bundled with the gem to verify that connection,
+  whatever the value of the `ca_file_path` configuration option. This meant the
+  installation failed behind a proxy that intercepts TLS connections, such as
+  Zscaler, even when `APPSIGNAL_CA_FILE_PATH` pointed to a CA bundle that trusts
+  the proxy.
+
+  The bundled CA certificate is still used when `APPSIGNAL_CA_FILE_PATH` is not
+  set.
+
+  Thanks [@Cosmo](https://github.com/Cosmo) for your contribution!
+
+  (patch [5a126864](https://github.com/appsignal/appsignal-ruby/commit/5a126864314b0c4f244dab653c9548f48f7fd413), [0c49fc51](https://github.com/appsignal/appsignal-ruby/commit/0c49fc51a385d8e70a324792dc7dace3109b8424))
+
+## 4.10.0
+
+_Published on 2026-08-10._
+
+### Changed
+
+- Fix Excon requests being reported as taking almost no time. An Excon request was
+  recorded as two events, one for sending the request and one for reading the
+  response, and neither of them covered the wait for the remote service. So a slow
+  Excon request looked fast in the event timeline, however long it really took.
+
+  An Excon request is now recorded as a single `request.excon` event covering the
+  whole request, so the event lasts as long as the request did. A request that
+  Excon retried, or that was redirected, is also one event, covering every attempt
+  or every hop.
+
+  The `response.excon`, `retry.excon` and `error.excon` events no longer exist.
+  Excon does not tell an instrumentor which request those events belonged to, so
+  `response.excon` never had a title and `error.excon` was always titled `" ://"`.
+
+  AppSignal also no longer registers itself as Excon's instrumentor. Excon allows
+  only one instrumentor, so an application that set up its own was having it
+  replaced. Your own instrumentor now keeps working.
+
+  (minor [a931661f](https://github.com/appsignal/appsignal-ruby/commit/a931661f10c8a633384ba7ff71e01a03ae3cdbe5))
+- Report which template was rendered for collection and layout render events.
+
+  Rendering a template or a partial is reported with the template's path, so you
+  can tell one from another. Rendering a collection or a layout was reported
+  without one. Every collection render in an application was recorded as the same
+  event, however many different partials it rendered, and so was every layout
+  render.
+
+  They now carry the template's path as well. A collection render reports the
+  partial it rendered for each item in the collection, and a layout render
+  reports the layout.
+
+  This means an application that renders several collections, or several layouts,
+  now sees one event per template where it used to see one event in total. That
+  is what makes it possible to tell which of them is the slow one.
+
+  (patch [79d8987a](https://github.com/appsignal/appsignal-ruby/commit/79d8987acbeb0d6d935f52f95b789f2f6a993bef))
+- Name ROM query events after ROM, rather than after the database they ran
+  against.
+
+  A query made through ROM was reported as `query.postgres`, or `query.sqlite`,
+  or whatever else the application's database was. The part after the dot is what
+  AppSignal groups events by, so an application's queries were split into a group
+  per database engine, and the same application reported one group in production
+  and another one in its test suite. Those queries are now all reported as
+  `query.rom`.
+
+  Events that dry-monitor reports and AppSignal has no formatter for are now named
+  after their event id followed by `.dry`, so an event reported as `foo` becomes
+  `foo.dry`. They had no group at all before.
+
+  If you have a dashboard, trigger or saved filter that names one of these events,
+  point it at the new name.
+
+  (patch [effe80c7](https://github.com/appsignal/appsignal-ruby/commit/effe80c7c8341ceb2d4f99714d1130b292d2b16c))
+
+### Fixed
+
+- Fix a rare hang when stopping AppSignal in an application that sends check-ins.
+  Stopping AppSignal waits for any check-in events that have not been transmitted
+  yet, and it could wait forever instead of finishing.
+
+  (patch [8956d4b8](https://github.com/appsignal/appsignal-ruby/commit/8956d4b88db9ae88a9bcd7e781ee62a79154c093))
+- Fix event formatters that register or unregister themselves. Calling
+  `unregister` on the formatter itself, as in `MyFormatter.unregister("my.event")`,
+  did nothing at all. The formatter stayed registered, and no error was raised and
+  nothing was logged to say so. Calling `register` on the formatter itself stored
+  it where AppSignal never looked for it, so it was never used to format an event.
+
+  Registering and unregistering through `Appsignal::EventFormatter` itself, as in
+  `Appsignal::EventFormatter.unregister("my.event", MyFormatter)`, was not
+  affected and keeps working the same way.
+
+  (patch [ecfa4950](https://github.com/appsignal/appsignal-ruby/commit/ecfa495081c2a47c75017727e48bf17c7ae77351))
+
+## 4.9.1
+
+_Published on 2026-07-27._
+
+### Fixed
+
+- Fix Que jobs being corrupted on enqueue when using Que 0.x. This was introduced
+  in version 4.9.0. Que 1 and Que 2 were not affected.
+
+  (patch [947d06b2](https://github.com/appsignal/appsignal-ruby/commit/947d06b2793ede14f9c0350f0b4a338cce7d1452), [1cc52bf3](https://github.com/appsignal/appsignal-ruby/commit/1cc52bf320571989c28af148d1086bdb872eab36))
+
+## 4.9.0
+
+_Published on 2026-07-16._
+
+### Added
+
+- Improve Faraday support. AppSignal now instruments Faraday requests automatically, without double-instrumenting the underlying HTTP client. Turn it off with the `instrument_faraday` option. (minor [c3354af3](https://github.com/appsignal/appsignal-ruby/commit/c3354af3f2497a984aa0110c9460d92ae3b5676f), [24aa25da](https://github.com/appsignal/appsignal-ruby/commit/24aa25da63a6b7abf74f3c29ce0d27ccbda38422))
+- Add config options to turn individual integrations off. Set
+  `instrument_sidekiq`, `instrument_shoryuken`, `instrument_que`,
+  `instrument_resque`, `instrument_delayed_job`, `instrument_active_job`,
+  `instrument_excon` or `instrument_mongo` to `false` to disable that
+  integration entirely. This turns off both the instrumentation of the jobs or
+  requests and the enqueue instrumentation for that integration. They all
+  default to `true`. Each can also be set through its environment variable, such
+  as `APPSIGNAL_INSTRUMENT_SIDEKIQ`.
+
+  (minor [d899994e](https://github.com/appsignal/appsignal-ruby/commit/d899994e23e32d6afac6ab457b905399a8ea68e3))
+- Instrument background job enqueues. Enqueuing a job now records an enqueue
+  event on the active transaction, so enqueues made from within a web request or
+  another job show up in the event timeline. This is recorded for Sidekiq
+  (`enqueue.sidekiq`), Que (`enqueue.que`, plus `bulk_enqueue.que` for bulk
+  enqueues on Que 2), Resque (`enqueue.resque`), Shoryuken (`enqueue.shoryuken`)
+  and Delayed Job (`enqueue.delayed_job`). Each event is titled after the job
+  being enqueued.
+
+  For Active Job, the `enqueue.active_job` event is now recorded by AppSignal's
+  own instrumentation rather than by Rails' native `enqueue.active_job`
+  notification. The native notification is suppressed so the enqueue is recorded
+  once, and the event is now titled after the job being enqueued.
+
+  These enqueue events can be turned off with the
+  `enable_job_enqueue_instrumentation` config option. Set it to `false` to stop
+  recording enqueue events across all integrations, without affecting the
+  instrumentation of the jobs themselves. It defaults to `true` and can also be
+  set through the `APPSIGNAL_ENABLE_JOB_ENQUEUE_INSTRUMENTATION` environment
+  variable.
+
+  (minor [caa8fbc7](https://github.com/appsignal/appsignal-ruby/commit/caa8fbc766f67e945836e6f78bc61ce98d8e0288))
+- Report the `grape` gem version in the environment metadata. For more information, see [our environment metadata docs](https://docs.appsignal.com/application/environment-metadata). (patch [6e91223c](https://github.com/appsignal/appsignal-ruby/commit/6e91223c777a3da8dc2b5c68c3b446fb61db8b5b))
+
+### Fixed
+
+- Instrument HTTP.rb chained requests on http 6. Requests made through a chained
+  client -- `HTTP.follow.get(...)`, `HTTP.headers(...).get(...)`, and so on -- go
+  through `HTTP::Session` rather than `HTTP::Client`, and were not being recorded.
+  They now produce a `request.http_rb` event like any other request.
+
+  (patch [9de9522a](https://github.com/appsignal/appsignal-ruby/commit/9de9522af442cb8b51be5b59702558002fbb5169))
+
 ## 4.8.6
 
 _Published on 2026-06-23._

@@ -8,15 +8,56 @@ describe Appsignal::EventFormatter::Rom::SqlFormatter do
     expect(Appsignal::EventFormatter.registered?("sql.dry", klass)).to be_truthy
   end
 
+  describe "#opentelemetry_kind" do
+    subject { formatter.opentelemetry_kind }
+
+    it { is_expected.to eq :client }
+  end
+
+  describe "#opentelemetry_scope" do
+    subject { formatter.opentelemetry_scope }
+
+    # These events arrive over dry-monitor, but ROM is what emits them, and the
+    # scope names the library the instrumentation is for.
+    it { is_expected.to eq ["appsignal-ruby/rom", Appsignal::VERSION] }
+  end
+
   describe "#format" do
-    let(:payload) do
-      {
-        :name => "postgres",
-        :query => "SELECT * FROM users"
-      }
-    end
     subject { formatter.format(payload) }
 
-    it { is_expected.to eq ["query.postgres", "SELECT * FROM users", 1] }
+    # ROM reports the database it is talking to as the event's `name`, as
+    # Sequel's database type. Every ROM query is named after ROM whichever
+    # database that is, so that they are all in one group.
+    context "with a PostgreSQL database" do
+      let(:payload) { { :name => :postgres, :query => "SELECT * FROM users" } }
+
+      it { is_expected.to eq ["query.rom", "SELECT * FROM users", 1] }
+    end
+
+    context "with a SQLite database" do
+      let(:payload) { { :name => :sqlite, :query => "SELECT * FROM users" } }
+
+      it { is_expected.to eq ["query.rom", "SELECT * FROM users", 1] }
+    end
+  end
+
+  describe "#opentelemetry_attributes" do
+    subject { formatter.opentelemetry_attributes(payload) }
+
+    context "with a database type the mapping recognises" do
+      let(:payload) { { :name => :postgres, :query => "SELECT * FROM users" } }
+
+      it "names the engine" do
+        is_expected.to eq("db.system.name" => "postgresql")
+      end
+    end
+
+    context "with a database type the mapping does not recognise" do
+      let(:payload) { { :name => :db2, :query => "SELECT * FROM users" } }
+
+      it "names nothing, leaving the SQL sentinel to apply" do
+        is_expected.to be_nil
+      end
+    end
   end
 end

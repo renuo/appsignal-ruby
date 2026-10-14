@@ -20,6 +20,8 @@ VERSION_MANAGERS = {
   }
 }.freeze
 
+SPEC_COVERAGE_AUDIT_JOB_NAME = "Spec coverage audit"
+
 def build_job(ruby_version, ruby_gem: nil, runs_on: DEFAULT_RUNS_ON)
   name = "Ruby #{ruby_version}"
   name = "#{name} - #{ruby_gem}" if ruby_gem
@@ -57,6 +59,89 @@ def build_job(ruby_version, ruby_gem: nil, runs_on: DEFAULT_RUNS_ON)
   }
 end
 
+# Every test job uploads the example list its run wrote, named after the job so
+# the audit can say which combination is missing one. Uploaded even when the run
+# fails, because the list is written either way and the audit needs to tell a
+# crashed job apart from a combination that legitimately runs nothing.
+def example_list_upload_step(key)
+  {
+    "name" => "Upload example list",
+    "if" => "always()",
+    "uses" => "actions/upload-artifact@v4",
+    "with" => {
+      "name" => key,
+      "path" => "tmp/examples-*.json",
+      "if-no-files-found" => "error",
+      "retention-days" => 1
+    }
+  }
+end
+
+# Compares the examples defined in the source against the union of every job's
+# example list.
+#
+# It cannot wait for the test jobs through `needs`. Naming all 426 of them puts
+# the workflow over a limit on how many dependency edges GitHub accepts, and
+# GitHub then refuses to create the run without reporting anything: no run
+# appears, the pull request shows no checks, and the runs API stays empty.
+# Grouping the dependencies behind intermediate jobs does not help, because the
+# same number of edges still has to exist. So this job starts with the others
+# and waits by polling the run it belongs to.
+def spec_coverage_audit_job
+  {
+    "name" => SPEC_COVERAGE_AUDIT_JOB_NAME,
+    "needs" => "validation",
+    "runs-on" => DEFAULT_RUNS_ON,
+    # Reports without failing the build. The examples it currently finds are
+    # covered by separate work; removing this line is what makes it enforcing.
+    "continue-on-error" => true,
+    # Long enough for the whole matrix, and short enough that a stuck job does
+    # not hold a runner for the six hours GitHub would otherwise allow.
+    "timeout-minutes" => 180,
+    "permissions" => {
+      "actions" => "read",
+      "contents" => "read"
+    },
+    "steps" => [
+      {
+        "name" => "Check out repository",
+        "uses" => "actions/checkout@v4"
+      },
+      {
+        "name" => "Install Ruby",
+        "uses" => "ruby/setup-ruby@v1",
+        "with" => { "ruby-version" => "3.4" }
+      },
+      {
+        "name" => "Wait for the test jobs to upload their example lists",
+        "env" => { "GH_TOKEN" => "${{ secrets.GITHUB_TOKEN }}" },
+        "run" => <<~SHELL
+          jobs="repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
+          filter='.jobs[]
+            | select(.name != "#{SPEC_COVERAGE_AUDIT_JOB_NAME}")
+            | select(.status != "completed")
+            | .name'
+          while :; do
+            pending=$(gh api --paginate "$jobs?per_page=100" --jq "$filter" | wc -l)
+            if [ "$pending" -eq 0 ]; then break; fi
+            echo "Waiting for $pending jobs."
+            sleep 60
+          done
+        SHELL
+      },
+      {
+        "name" => "Download example lists",
+        "uses" => "actions/download-artifact@v4",
+        "with" => { "path" => "artifacts" }
+      },
+      {
+        "name" => "Audit spec coverage",
+        "run" => "ruby script/audit_spec_coverage.rb artifacts"
+      }
+    ]
+  }
+end
+
 def build_matrix_key(ruby_version, ruby_gem: nil, runs_on: DEFAULT_RUNS_ON)
   base = "ruby_#{ruby_version}"
   base = "#{base}__#{ruby_gem}" if ruby_gem
@@ -72,7 +157,50 @@ GITHUB_ACTION_WORKFLOW_FILE = ".github/workflows/ci.yml"
 PRIMARY_JOB_GEMSET = "no_dependencies"
 DEFAULT_RUNS_ON = "ubuntu-latest"
 
+COLLECTOR_GEMFILE_PARTIAL = "collector.rb"
+
 namespace :build_matrix do
+  namespace :gemfiles do
+    # Generates a `<base>-collector.gemfile` next to each base gemfile. The
+    # variant layers the optional OpenTelemetry gems (`gemfiles/collector.rb`)
+    # on top of the base, so collector-mode test runs resolve them while the
+    # base gemfiles (and the gemspec) stay OpenTelemetry-free. Regenerate
+    # whenever a base gemfile is added or removed.
+    task :generate do
+      base_gemfiles =
+        Dir["gemfiles/*.gemfile"]
+          .map { |path| File.basename(path) }
+          .reject { |name| name.end_with?("-collector.gemfile") }
+          .sort
+
+      base_gemfiles.each do |base|
+        name = base.sub(/\.gemfile\z/, "")
+        contents =
+          "# DO NOT EDIT\n" \
+            "# This is a generated file by the " \
+            "`rake build_matrix:gemfiles:generate` task.\n" \
+            "# It layers the optional OpenTelemetry gems (gemfiles/" \
+            "#{COLLECTOR_GEMFILE_PARTIAL}) on top of #{base}.\n" \
+            "\n" \
+            "eval_gemfile File.expand_path(#{base.inspect}, __dir__)\n" \
+            "eval_gemfile File.expand_path(" \
+            "#{COLLECTOR_GEMFILE_PARTIAL.inspect}, __dir__)\n"
+        File.write("gemfiles/#{name}-collector.gemfile", contents)
+      end
+
+      puts "Generated #{base_gemfiles.count} `-collector` gemfiles."
+    end
+
+    task :validate => :generate do
+      output = `git status --porcelain gemfiles`
+      if output.include?("-collector.gemfile")
+        puts "The `-collector` gemfiles are out of date. The changes were not committed."
+        puts "Please run `rake build_matrix:gemfiles:generate` and commit the changes."
+        exit 1
+      end
+    end
+  end
+
   namespace :github do
     task :generate do
       yaml = YAML.load_file("build_matrix.yml")
@@ -107,12 +235,31 @@ namespace :build_matrix do
               "name" => "Run tests without extension",
               "run" => "./script/bundler_wrapper exec rake test:failure"
             }
+            job["steps"] << example_list_upload_step(build_matrix_key(ruby["ruby"]))
             builds[build_matrix_key(ruby["ruby"])] = job
           else
             job["needs"] = build_matrix_key(ruby["ruby"])
             job["steps"] << test_step
-            builds[build_matrix_key(ruby["ruby"], :ruby_gem => ruby_gem["gem"])] = job
+            gem_key = build_matrix_key(ruby["ruby"], :ruby_gem => ruby_gem["gem"])
+            job["steps"] << example_list_upload_step(gem_key)
+            builds[gem_key] = job
           end
+
+          # On collector-capable Rubies, additionally run the gem's
+          # `-collector` gemfile (base gems + optional OpenTelemetry gems) so
+          # collector-mode specs are exercised. These always depend on the
+          # primary job for the Ruby version and run on Ubuntu only.
+          next unless collector_ruby?(matrix, ruby_version)
+
+          collector_gem = "#{ruby_gem["gem"]}-collector"
+          collector_job = build_job(ruby_version, :ruby_gem => collector_gem)
+          collector_job["env"] = matrix["env"]
+            .merge("BUNDLE_GEMFILE" => "gemfiles/#{collector_gem}.gemfile")
+          collector_job["needs"] = build_matrix_key(ruby["ruby"])
+          collector_job["steps"] << test_step
+          collector_key = build_matrix_key(ruby["ruby"], :ruby_gem => collector_gem)
+          collector_job["steps"] << example_list_upload_step(collector_key)
+          builds[collector_key] = collector_job
         end
 
         # Add build for macOS
@@ -130,8 +277,12 @@ namespace :build_matrix do
           "name" => "Run tests without extension",
           "run" => "./script/bundler_wrapper exec rake test:failure"
         }
-        builds[build_matrix_key(ruby["ruby"], :runs_on => runs_on)] = job
+        macos_key = build_matrix_key(ruby["ruby"], :runs_on => runs_on)
+        job["steps"] << example_list_upload_step(macos_key)
+        builds[macos_key] = job
       end
+
+      builds["spec_coverage_audit"] = spec_coverage_audit_job
 
       github["jobs"] = github["jobs"].merge(builds)
 
@@ -191,6 +342,14 @@ namespace :build_matrix do
             out << "#{bundler_version} #{gemfile_env} ./script/bundler_wrapper install --quiet || { echo 'Bundling failed'; exit 1; }"
             out << "echo 'Running #{gemfile} in #{ruby_version}'"
             out << "#{bundler_version} #{gemfile_env} ./script/bundler_wrapper exec rspec || { echo 'Running specs failed'; exit 1; }"
+
+            next unless collector_ruby?(matrix, ruby_version)
+
+            collector_env = "env BUNDLE_GEMFILE=gemfiles/#{gemfile}-collector.gemfile"
+            out << "echo 'Bundling #{gemfile}-collector in #{ruby_version}'"
+            out << "#{bundler_version} #{collector_env} ./script/bundler_wrapper install --quiet || { echo 'Bundling failed'; exit 1; }"
+            out << "echo 'Running #{gemfile}-collector in #{ruby_version}'"
+            out << "#{bundler_version} #{collector_env} ./script/bundler_wrapper exec rspec || { echo 'Running specs failed'; exit 1; }"
           end
           # rubocop:enable Layout/LineLength
           out << ""
@@ -205,6 +364,10 @@ namespace :build_matrix do
         puts "Generated #{script}"
       end
     end
+  end
+
+  def collector_ruby?(matrix, ruby_version)
+    Array(matrix.dig("collector", "ruby")).include?(ruby_version)
   end
 
   def gemset_for_ruby(ruby, matrix)
@@ -288,6 +451,23 @@ namespace :build do
   desc "Build all gem versions"
   task :all => ["ruby:gem", "jruby:gem"]
 
+  desc "Build every package in this repository"
+  task :packages => :all do
+    # Build the companion gem by delegating to its own Rakefile rather than
+    # duplicating its build logic here. mono builds each package directly, so
+    # this task is only a convenience for developers building from the root.
+    #
+    # Clear the Bundler environment first so the sub-build resolves against the
+    # package's own Gemfile instead of inheriting this repository's
+    # BUNDLE_GEMFILE. Install its dependencies first, then build it.
+    Bundler.with_unbundled_env do
+      Dir.chdir("packages/opentelemetry") do
+        sh "bundle install"
+        sh "bundle exec rake build:all"
+      end
+    end
+  end
+
   desc "Clean up all gem build artifacts"
   task :clean do
     FileUtils.rm_rf File.expand_path("pkg", __dir__)
@@ -361,14 +541,25 @@ begin
   excludes << "spec/lib/appsignal/extension/jruby_spec.rb" unless is_jruby
   exclude_pattern = "--exclude-pattern=#{excludes.join(",")}" if excludes.any?
 
+  # Written alongside the human-readable output so the coverage audit can tell
+  # which examples this Ruby and gemfile combination actually ran. Every CI job
+  # uploads its list. Nothing else reveals that a dependency guard is false in
+  # every combination, because a guarded example is then never defined at all.
+  def example_list_opts(name)
+    "--format json --out tmp/examples-#{name}.json"
+  end
+
   desc "Run the AppSignal gem test suite."
   RSpec::Core::RakeTask.new :test do |t|
-    t.rspec_opts = "#{exclude_pattern} --format documentation"
+    t.rspec_opts = "#{exclude_pattern} --format documentation " \
+      "#{example_list_opts("test")}"
   end
 
   namespace :test do
     RSpec::Core::RakeTask.new :rspec_failure do |t|
-      t.rspec_opts = "#{exclude_pattern} --tag extension_installation_failure"
+      t.rspec_opts = "#{exclude_pattern} --format documentation " \
+        "--tag extension_installation_failure " \
+        "#{example_list_opts("failure")}"
     end
 
     desc "Intentionally fail the extension installation"

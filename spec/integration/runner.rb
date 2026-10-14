@@ -1,9 +1,36 @@
+require "fileutils"
+require "tmpdir"
+
 class Runner
+  # Env key the Runner sets itself (see `run`). Callers can't pass it via
+  # `env:` — the Runner owns the per-run working directory.
+  WORKING_DIRECTORY_ENV = "APPSIGNAL_WORKING_DIRECTORY_PATH".freeze
+
+  # Config every runner script needs, supplied as env vars so the scripts
+  # don't each hardcode it; `Appsignal.start` reads it from the environment.
+  # Specs assert against these values via this constant instead of repeating
+  # the literals. Overridable per run by passing the same key in `env:`.
+  DEFAULT_ENV = {
+    "APPSIGNAL_APP_NAME" => "integration-runner",
+    "APPSIGNAL_APP_ENV" => "test",
+    "APPSIGNAL_PUSH_API_KEY" => "abc"
+  }.freeze
+
   attr_reader :pid, :output, :status
 
-  def initialize(name)
+  # @param env [Hash] Extra environment variables to set in the spawned
+  #   child process, e.g. `"APPSIGNAL_COLLECTOR_ENDPOINT"` to run against the
+  #   mock collector. Merged over {DEFAULT_ENV}; must not overlap with the
+  #   Runner-managed keys.
+  def initialize(name, env: {})
+    if env.key?(WORKING_DIRECTORY_ENV)
+      raise ArgumentError,
+        "#{WORKING_DIRECTORY_ENV} is managed by Runner and can't be passed via `env:`"
+    end
+
     @script_name = name
     @script_file = "#{@script_name}.rb"
+    @env = DEFAULT_ENV.merge(env)
     @pid = nil
     @output = nil
     @status = nil
@@ -12,6 +39,14 @@ class Runner
     @read, @write = IO.pipe
     @has_run = false
     @finished = false
+    # Per-run working directory. Passed to the subprocess via
+    # `APPSIGNAL_WORKING_DIRECTORY_PATH` so runner scripts don't have to
+    # manage one themselves. Created under `/tmp` rather than the default
+    # `$TMPDIR` because macOS's default tmpdir lives under
+    # `/var/folders/...` and the resulting agent socket path exceeds the
+    # 104-char macOS unix-socket limit, which would hang
+    # `Appsignal::Extension.stop`. Cleaned up after the process exits.
+    @working_dir = Dir.mktmpdir("appsignal-runner-", "/tmp")
   end
 
   def has_run?
@@ -22,6 +57,18 @@ class Runner
     @finished
   end
 
+  # Waits until the script creates a `ready` file in its working directory,
+  # for specs that have to interact with the script after it has booted. On
+  # a timeout it returns, so that `run` reports how the script exited.
+  def wait_until_ready(timeout: 30)
+    ready_file = File.join(@working_dir, "ready")
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    until File.exist?(ready_file) ||
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      sleep 0.05
+    end
+  end
+
   def run
     raise "Can't run runner more than once!" if @has_run
 
@@ -29,6 +76,7 @@ class Runner
     executable = jruby? ? "jruby" : "ruby"
     directory = File.join(__dir__, "runners")
     @pid = spawn(
+      @env.merge(WORKING_DIRECTORY_ENV => @working_dir),
       "#{executable} #{@script_file}",
       {
         [:out, :err] => @write,
@@ -48,9 +96,42 @@ class Runner
     end
     read_output
     @finished = true
+
+    # Asked of the status rather than the exit code, because a process killed by
+    # a signal has no exit code. Reading one would raise a NoMethodError on nil
+    # and hide both the signal and the output below.
+    return if @status.success?
+
+    raise "Runner '#{@script_file}' did not exit successfully (#{@status}).\n" \
+      "Output:\n#{@output}"
+  ensure
+    # The agent the script started outlives it and keeps writing into the
+    # working directory, so it has to exit before the directory is removed.
+    stop_agent
+    FileUtils.remove_entry(@working_dir) if @working_dir && File.exist?(@working_dir)
   end
 
   private
+
+  def stop_agent
+    lock_file = File.join(@working_dir, "agent.lock")
+    return unless File.exist?(lock_file)
+
+    pid = File.read(lock_file).split(";")[2].to_i
+    return unless pid.positive?
+
+    Process.kill("KILL", pid)
+    Timeout.timeout(@finish_timeout) { sleep 0.01 while process_alive?(pid) }
+  rescue Errno::ESRCH, Timeout::Error
+    nil
+  end
+
+  def process_alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
 
   def read_output
     Timeout.timeout(@read_timeout) do

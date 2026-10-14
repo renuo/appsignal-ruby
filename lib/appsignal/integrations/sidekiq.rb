@@ -38,10 +38,18 @@ module Appsignal
           # Sidekiq error outside of the middleware scope.
           # Can be a job JSON parse error or some other error happening in
           # Sidekiq.
-          transaction = Appsignal::Transaction.create(Appsignal::Transaction::BACKGROUND_JOB)
+          transaction = Appsignal::Transaction.create(
+            Appsignal::Transaction::BACKGROUND_JOB,
+            :opentelemetry_scope => ["appsignal-ruby/sidekiq", Appsignal::VERSION],
+            :opentelemetry_kind => :consumer,
+            :opentelemetry_relationship => :both
+          )
+          transaction.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::Messaging.perform_attributes("sidekiq")
+          )
           transaction.set_action_if_nil("SidekiqInternal")
           transaction.set_metadata("sidekiq_error", sidekiq_context[:context])
-          transaction.add_params_if_nil(:jobstr => sidekiq_context[:jobstr])
+          transaction.add_function_parameters_if_nil(:jobstr => sidekiq_context[:jobstr])
           transaction.set_error(exception)
         end
 
@@ -49,23 +57,101 @@ module Appsignal
       end
     end
 
-    # Sidekiq client middleware that runs on enqueue. Records an
-    # `enqueue.sidekiq` event so the enqueue shows up under the active
-    # transaction.
+    # Resolves the name of a Sidekiq job. That's normally the job class, but
+    # the Sidekiq delayed extensions encode the real target and method as YAML
+    # in the job's first argument, so those are decoded into a `Target.method`
+    # (class) or `Target#method` (instance) name.
+    #
+    # Shared between the client middleware, which titles the enqueue event with
+    # it, and the server middleware, which names the perform transaction with
+    # it. The same job then reads the same name on both sides.
+    #
+    # @!visibility private
+    module SidekiqActionName
+      module_function
+
+      # Based on: https://github.com/mperham/sidekiq/blob/63ee43353bd3b753beb0233f64865e658abeb1c3/lib/sidekiq/api.rb#L316-L334
+      def parse_action_name(job)
+        args = job.fetch("args", [])
+        job_class = job["class"]
+        case job_class
+        when "Sidekiq::Extensions::DelayedModel"
+          safe_load(args[0], job_class) do |target, method, _|
+            "#{target.class}##{method}"
+          end
+        when /\ASidekiq::Extensions::Delayed/
+          safe_load(args[0], job_class) do |target, method, _|
+            "#{target}.#{method}"
+          end
+        else
+          job_class
+        end
+      end
+
+      # Based on: https://github.com/mperham/sidekiq/blob/63ee43353bd3b753beb0233f64865e658abeb1c3/lib/sidekiq/api.rb#L403-L412
+      def safe_load(content, default)
+        if Gem::Version.new(YAML::VERSION) >= Gem::Version.new("4.0.0")
+          yield(*YAML.unsafe_load(content))
+        else
+          yield(*YAML.load(content)) # rubocop:disable Security/YAMLLoad
+        end
+      rescue => error
+        # Sidekiq issue #1761: in dev mode, it's possible to have jobs enqueued
+        # which haven't been loaded into memory yet so the YAML can't be
+        # loaded.
+        Appsignal.internal_logger.warn(
+          "Unable to load YAML from Sidekiq delayed extension job: #{error.message}"
+        )
+        default
+      end
+    end
+
+    # Client middleware that runs on enqueue. Records an `enqueue.sidekiq`
+    # event so the enqueue shows up under the active transaction (both modes),
+    # and in collector mode writes the trace context onto the job hash so the
+    # job that later performs links back to it.
     #
     # Like all AppSignal events, this only records when there's an active
-    # transaction (e.g. enqueuing from within a web request or another job). An
-    # enqueue with no transaction is a transparent pass-through.
+    # transaction (e.g. enqueuing from within a web request or another job).
+    # An enqueue with no transaction is a transparent pass-through.
     #
     # @!visibility private
     class SidekiqClientMiddleware
-      def call(_worker_class, job, _queue, _redis_pool, &block)
-        # Under Active Job the enqueue is already recorded as an
-        # `enqueue.active_job` event, so skip recording it again here.
-        return yield if Appsignal::Transaction.current? &&
-          Appsignal::Transaction.current.job_enqueue_events_suppressed?
+      def call(_worker_class, job, _queue, _redis_pool)
+        # When enqueue instrumentation is disabled, drop the trace context along
+        # with the event. Without an enqueue event there is no producer span, so
+        # the context we would write is that of whatever span is current, such as
+        # the surrounding web request. The job that performs later would then
+        # link back to a span that is not a producer.
+        return yield if Appsignal.config && !Appsignal.config[:enable_job_enqueue_instrumentation]
 
-        Appsignal.instrument("enqueue.sidekiq", "enqueue #{job["class"]} job", &block)
+        # Under Active Job the enqueue is already recorded as an
+        # `enqueue.active_job` event, so skip recording it again here. The trace
+        # context is still injected so the performed job links back.
+        if Appsignal::Transaction.current? &&
+            Appsignal::Transaction.current.job_enqueue_events_suppressed?
+          Appsignal::OpenTelemetry.inject_context(job)
+          return yield
+        end
+
+        title = "enqueue #{SidekiqActionName.parse_action_name(job)} job"
+        Appsignal.instrument(
+          "enqueue.sidekiq",
+          title,
+          :opentelemetry_kind => :producer,
+          :opentelemetry_scope => ["appsignal-ruby/sidekiq", Appsignal::VERSION]
+        ) do
+          # Describes this span as a job being enqueued. The messaging system
+          # is what the trace timeline reads to recognize background job work,
+          # and `sidekiq` is the value OpenTelemetry's own Sidekiq
+          # instrumentation uses.
+          Appsignal::Transaction.current.add_opentelemetry_attributes(
+            Appsignal::OpenTelemetry::Messaging
+              .enqueue_attributes("sidekiq", :destination => job["queue"])
+          )
+          Appsignal::OpenTelemetry.inject_context(job)
+          yield
+        end
       end
     end
 
@@ -76,7 +162,7 @@ module Appsignal
       EXCLUDED_JOB_KEYS = %w[
         args backtrace class created_at enqueued_at error_backtrace error_class
         error_message failed_at jid retried_at retry wrapped cattr tags retry_for
-        unique_for
+        unique_for traceparent tracestate __otel_headers
       ].freeze
 
       def self.sidekiq8?
@@ -88,7 +174,21 @@ module Appsignal
       def call(_worker, item, _queue, &block)
         job_status = nil
         action_name = formatted_action_name(item)
-        transaction = Appsignal::Transaction.create(Appsignal::Transaction::BACKGROUND_JOB)
+        # Read trace context off the job so the transaction links back to the
+        # enqueuer. No-op outside collector mode.
+        job_data = active_job_data(item)
+        transaction = Appsignal::Transaction.create(
+          Appsignal::Transaction::BACKGROUND_JOB,
+          :opentelemetry_context => extract_context(item, job_data),
+          :opentelemetry_scope => ["appsignal-ruby/sidekiq", Appsignal::VERSION],
+          :opentelemetry_kind => :consumer,
+          :opentelemetry_relationship =>
+            Appsignal::OpenTelemetry.active_job_relationship(job_data)
+        )
+        transaction.add_opentelemetry_attributes(
+          Appsignal::OpenTelemetry::Messaging
+            .perform_attributes("sidekiq", :destination => item["queue"])
+        )
         transaction.set_action_if_nil(action_name)
 
         formatted_metadata(item).each do |key, value|
@@ -96,13 +196,22 @@ module Appsignal
         end
 
         begin
-          Appsignal.instrument "perform_job.sidekiq", &block
+          Appsignal.instrument(
+            "perform_job.sidekiq",
+            :opentelemetry_scope => ["appsignal-ruby/sidekiq", Appsignal::VERSION]
+          ) do
+            Appsignal::Transaction.current.add_opentelemetry_attributes(
+              Appsignal::OpenTelemetry::Messaging
+                .perform_attributes("sidekiq", :destination => item["queue"])
+            )
+            block.call
+          end
         rescue Exception => exception
           job_status = :failed
           raise exception
         ensure
           if transaction
-            transaction.add_params_if_nil { parse_arguments(item) }
+            transaction.add_function_parameters_if_nil { parse_arguments(item) }
             enqueued_at = item["enqueued_at"]
             queue_start =
               if self.class.sidekiq8?
@@ -139,12 +248,31 @@ module Appsignal
 
       private
 
+      # The trace context to continue: the Active Job layer when this is an
+      # Active Job job, the Sidekiq job itself otherwise. See `Appsignal::OpenTelemetry.extract_active_job_context`
+      # for why that layer wins.
+      def extract_context(item, job_data)
+        Appsignal::OpenTelemetry.extract_active_job_context(job_data) ||
+          Appsignal::OpenTelemetry.extract_job_context(item)
+      end
+
+      # The serialized Active Job job data inside a Sidekiq job, or nil when this
+      # is not an Active Job job. Both Active Job adapters for Sidekiq, the one in
+      # Rails and the one in the Sidekiq gem, enqueue a wrapper class with the
+      # job data as its only argument and name the real job class in `wrapped`.
+      def active_job_data(item)
+        return unless item["wrapped"]
+
+        job_data = item["args"]&.first
+        job_data if job_data.is_a?(Hash)
+      end
+
       def increment_counter(key, value, tags = {})
         Appsignal.increment_counter "sidekiq_#{key}", value, tags
       end
 
       def formatted_action_name(job)
-        sidekiq_action_name = parse_action_name(job)
+        sidekiq_action_name = SidekiqActionName.parse_action_name(job)
         return unless sidekiq_action_name
 
         complete_action = sidekiq_action_name =~ /\.|#/
@@ -163,30 +291,12 @@ module Appsignal
         end
       end
 
-      # Based on: https://github.com/mperham/sidekiq/blob/63ee43353bd3b753beb0233f64865e658abeb1c3/lib/sidekiq/api.rb#L316-L334
-      def parse_action_name(job)
-        args = job.fetch("args", [])
-        job_class = job["class"]
-        case job_class
-        when "Sidekiq::Extensions::DelayedModel"
-          safe_load(args[0], job_class) do |target, method, _|
-            "#{target.class}##{method}"
-          end
-        when /\ASidekiq::Extensions::Delayed/
-          safe_load(args[0], job_class) do |target, method, _|
-            "#{target}.#{method}"
-          end
-        else
-          job_class
-        end
-      end
-
       # Based on: https://github.com/mperham/sidekiq/blob/63ee43353bd3b753beb0233f64865e658abeb1c3/lib/sidekiq/api.rb#L336-L358
       def parse_arguments(job)
         args = job.fetch("args", [])
         case job["class"]
         when /\ASidekiq::Extensions::Delayed/
-          safe_load(args[0], args) do |_, _, arg|
+          SidekiqActionName.safe_load(args[0], args) do |_, _, arg|
             arg
           end
         else
@@ -198,21 +308,6 @@ module Appsignal
           end
           args
         end
-      end
-
-      # Based on: https://github.com/mperham/sidekiq/blob/63ee43353bd3b753beb0233f64865e658abeb1c3/lib/sidekiq/api.rb#L403-L412
-      def safe_load(content, default)
-        if YAML::VERSION >= "4.0.0"
-          yield(*YAML.unsafe_load(content))
-        else
-          yield(*YAML.load(content)) # rubocop:disable Security/YAMLLoad
-        end
-      rescue => error
-        # Sidekiq issue #1761: in dev mode, it's possible to have jobs enqueued
-        # which haven't been loaded into memory yet so the YAML can't be
-        # loaded.
-        Appsignal.internal_logger.warn "Unable to load YAML: #{error.message}"
-        default
       end
     end
   end

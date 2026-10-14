@@ -37,10 +37,16 @@ module Appsignal
           env[Appsignal::Hooks::ActionCableHook::REQUEST_ID] ||= request_id
 
           transaction =
-            Appsignal::Transaction.create(Appsignal::Transaction::ACTION_CABLE)
+            Appsignal::Transaction.create(
+              Appsignal::Transaction::ACTION_CABLE,
+              :opentelemetry_scope => ["appsignal-ruby/action_cable", Appsignal::VERSION]
+            )
 
           begin
-            Appsignal.instrument "subscribed.action_cable" do
+            Appsignal.instrument(
+              "subscribed.action_cable",
+              :opentelemetry_scope => ["appsignal-ruby/action_cable", Appsignal::VERSION]
+            ) do
               inner.call
             end
           rescue Exception => exception
@@ -50,8 +56,11 @@ module Appsignal
             transaction.set_action_if_nil("#{channel.class}#subscribed")
             transaction.set_metadata("path", request.path)
             transaction.set_metadata("method", "websocket")
-            transaction.add_params_if_nil { request.params }
-            transaction.add_headers_if_nil { request.env }
+            transaction.add_request_payload_if_nil { request.params }
+            headers, environment =
+              Appsignal::Utils::RequestHeaders.split_lazily { request.env }
+            transaction.add_request_headers_if_nil(&headers)
+            transaction.add_request_environment_if_nil(&environment)
             transaction.add_session_data { request.session.to_h if request.respond_to? :session }
             transaction.add_tags(:request_id => request_id) if request_id
             Appsignal::Transaction.complete_current!
@@ -73,10 +82,16 @@ module Appsignal
           env[Appsignal::Hooks::ActionCableHook::REQUEST_ID] ||= request_id
 
           transaction =
-            Appsignal::Transaction.create(Appsignal::Transaction::ACTION_CABLE)
+            Appsignal::Transaction.create(
+              Appsignal::Transaction::ACTION_CABLE,
+              :opentelemetry_scope => ["appsignal-ruby/action_cable", Appsignal::VERSION]
+            )
 
           begin
-            Appsignal.instrument "unsubscribed.action_cable" do
+            Appsignal.instrument(
+              "unsubscribed.action_cable",
+              :opentelemetry_scope => ["appsignal-ruby/action_cable", Appsignal::VERSION]
+            ) do
               inner.call
             end
           rescue Exception => exception
@@ -86,8 +101,11 @@ module Appsignal
             transaction.set_action_if_nil("#{channel.class}#unsubscribed")
             transaction.set_metadata("path", request.path)
             transaction.set_metadata("method", "websocket")
-            transaction.add_params_if_nil { request.params }
-            transaction.add_headers_if_nil { request.env }
+            transaction.add_request_payload_if_nil { request.params }
+            headers, environment =
+              Appsignal::Utils::RequestHeaders.split_lazily { request.env }
+            transaction.add_request_headers_if_nil(&headers)
+            transaction.add_request_environment_if_nil(&environment)
             transaction.add_session_data { request.session.to_h if request.respond_to? :session }
             transaction.add_tags(:request_id => request_id) if request_id
             Appsignal::Transaction.complete_current!

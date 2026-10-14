@@ -7,6 +7,7 @@ IGNORED_PATHS = [
   ".changesets/",
   ".github/",
   "gemfiles/",
+  "packages/",
   "script/",
   "spec/",
 
@@ -60,7 +61,21 @@ Gem::Specification.new do |gem|
   # Needs 2.0+ because we rely on Rack::Events
   gem.add_dependency "rack", ">= 2.0.0"
 
+  # The OpenTelemetry SDK and OTLP exporters are *optional* and intentionally
+  # not declared here: they're only needed in collector mode (Ruby 3.1+), so
+  # bundling them would break Ruby 2.7 and burden non-collector users. Apps
+  # that enable collector mode add them to their own Gemfile; the minimum
+  # versions live in `lib/appsignal/opentelemetry/dependencies.rb` and are
+  # enforced at boot by `Appsignal::OpenTelemetry.configure`.
+
   gem.add_development_dependency "pry"
+  # Reached through webmock's addressable. Version 7 requires Ruby 3.2 and
+  # version 6 requires 3.0, so an older Ruby cannot resolve the development
+  # dependencies unless this is held back. The cop guards the requirements of
+  # the released gem, which a development dependency is not part of.
+  # rubocop:disable Gemspec/RubyVersionGlobalsUsage
+  gem.add_development_dependency "public_suffix", "< 6" if RUBY_VERSION < "3.2"
+  # rubocop:enable Gemspec/RubyVersionGlobalsUsage
   gem.add_development_dependency "rake", ">= 12"
   gem.add_development_dependency "rspec", "~> 3.8"
   gem.add_development_dependency "rubocop", "~> 1.87.0"
