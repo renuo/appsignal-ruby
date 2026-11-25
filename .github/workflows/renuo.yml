@@ -1,0 +1,51 @@
+# The fork only adds transaction sampling on top of upstream, so this runs the checks for that part alone.
+# The upstream "Ruby gem CI" workflow (ci.yml) is disabled in the repository settings and kept as upstream has it,
+# so that syncing with upstream never conflicts on it.
+name: Renuo fork CI
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  rubocop:
+    name: RuboCop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+      - run: bundle exec rubocop
+  signatures:
+    name: Type signatures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - name: Check the signatures match the YARD docs
+        run: |
+          script/generate_signatures
+          git diff --exit-code sig/
+      - run: find sig -name "*.rbi" -exec ruby -c {} \;
+      - run: bundle exec rbs parse sig/appsignal.rbs
+  sampling:
+    name: Sampling specs
+    runs-on: ubuntu-latest
+    env:
+      RAILS_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - run: bundle exec rake extension:install
+      - run: bundle exec rspec spec/lib/appsignal/config_spec.rb spec/lib/appsignal/transaction_spec.rb
