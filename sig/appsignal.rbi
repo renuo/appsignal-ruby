@@ -1587,6 +1587,10 @@ module Appsignal
       # _@return_ — CPU count override for metrics collection
       sig { returns(Float) }
       attr_accessor :cpu_count
+
+      # _@return_ — Share of transactions without errors to report, from 0.0 to 1.0
+      sig { returns(Float) }
+      attr_accessor :sampling_rate
     end
   end
 
@@ -1907,7 +1911,6 @@ module Appsignal
   class Transaction
     HTTP_REQUEST = T.let("http_request", T.untyped)
     BACKGROUND_JOB = T.let("background_job", T.untyped)
-    SAMPLING_RATE = T.let(ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f, T.untyped)
 
     # Create a new transaction and set it as the currently active
     # transaction.

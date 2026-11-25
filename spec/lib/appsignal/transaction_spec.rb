@@ -559,10 +559,8 @@ describe Appsignal::Transaction do
         expect(transaction).to include_tags("foo" => "bar")
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is set to 0.2" do
-        before do
-          stub_const("Appsignal::Transaction::SAMPLING_RATE", 0.2)
-        end
+      context "when the sampling rate is set to 0.2" do
+        let(:options) { { :sampling_rate => 0.2 } }
 
         context "and we are lucky" do
           before do
@@ -607,10 +605,8 @@ describe Appsignal::Transaction do
         end
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is set to 1" do
-        before do
-          stub_const("Appsignal::Transaction::SAMPLING_RATE", 1.0)
-        end
+      context "when the sampling rate is set to 1" do
+        let(:options) { { :sampling_rate => 1.0 } }
 
         before do
           allow(transaction).to receive(:rand).and_return(0.99)
@@ -625,10 +621,8 @@ describe Appsignal::Transaction do
         end
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is set to 0" do
-        before do
-          stub_const("Appsignal::Transaction::SAMPLING_RATE", 0.0)
-        end
+      context "when the sampling rate is set to 0" do
+        let(:options) { { :sampling_rate => 0.0 } }
 
         before do
           allow(transaction).to receive(:rand).and_return(0.01)
@@ -643,14 +637,12 @@ describe Appsignal::Transaction do
         end
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is NOT set" do
-        it { expect(Appsignal::Transaction::SAMPLING_RATE).to eq(1) }
+      context "when the sampling rate is NOT set" do
+        it { expect(Appsignal.config[:sampling_rate]).to eq(1.0) }
       end
 
-      context "when the APPSIGNAL_SAMPLING_RATE is set to 0 and multiple errors occurred" do
-        before do
-          stub_const("Appsignal::Transaction::SAMPLING_RATE", 0.0)
-        end
+      context "when the sampling rate is set to 0 and multiple errors occurred" do
+        let(:options) { { :sampling_rate => 0.0 } }
 
         it "reports every error" do
           transaction.add_error(ExampleStandardError.new("first error"))
@@ -663,10 +655,8 @@ describe Appsignal::Transaction do
         end
       end
 
-      describe "completing a transaction when the APPSIGNAL_SAMPLING_RATE is set to 0" do
-        before do
-          stub_const("Appsignal::Transaction::SAMPLING_RATE", 0.0)
-        end
+      describe "completing a transaction when the sampling rate is set to 0" do
+        let(:options) { { :sampling_rate => 0.0 } }
 
         it "in collector mode", :collector_mode do
           start_collector_agent

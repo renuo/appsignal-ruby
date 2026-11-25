@@ -28,9 +28,6 @@ module Appsignal
     # @!visibility private
     PARAMS_DEPRECATION_LOCK = Mutex.new
 
-    # @return [Float]
-    SAMPLING_RATE = ENV.fetch("APPSIGNAL_SAMPLING_RATE", "1").to_f
-
     class << self
       # Create a new transaction and set it as the currently active
       # transaction.
@@ -338,7 +335,7 @@ module Appsignal
       # in agent mode, or an event on an already-finished span in collector mode).
       return if completed?
 
-      if !error? && (rand > SAMPLING_RATE)
+      if !error? && (rand > sampling_rate)
         pause!
         discard!
       end
@@ -1178,6 +1175,11 @@ module Appsignal
     end
 
     private
+
+    # Without a config, report every transaction.
+    def sampling_rate
+      Appsignal.config&.[](:sampling_rate) || 1.0
+    end
 
     # The `SampleData` bucket a logical params channel is stored in, per the
     # backend's `params_mapping`. In agent mode every channel resolves to the

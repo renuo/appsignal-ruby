@@ -150,6 +150,7 @@ module Appsignal
         SERVER_PROTOCOL
       ],
       :response_headers => [],
+      :sampling_rate => 1.0,
       :send_environment_metadata => true,
       :send_function_parameters => true,
       :send_params => true,
@@ -278,7 +279,8 @@ module Appsignal
 
     # @!visibility private
     FLOAT_OPTIONS = {
-      :cpu_count => "APPSIGNAL_CPU_COUNT"
+      :cpu_count => "APPSIGNAL_CPU_COUNT",
+      :sampling_rate => "APPSIGNAL_SAMPLING_RATE"
     }.freeze
 
     # @!visibility private
@@ -1307,6 +1309,9 @@ module Appsignal
 
       # @!attribute [rw] cpu_count
       #   @return [Float] CPU count override for metrics collection
+
+      # @!attribute [rw] sampling_rate
+      #   @return [Float] Share of transactions without errors to report, from 0.0 to 1.0
 
       # @!endgroup
       Appsignal::Config::FLOAT_OPTIONS.each_key do |option|

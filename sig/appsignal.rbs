@@ -1454,6 +1454,9 @@ module Appsignal
 
       # _@return_ — CPU count override for metrics collection
       attr_accessor cpu_count: Float
+
+      # _@return_ — Share of transactions without errors to report, from 0.0 to 1.0
+      attr_accessor sampling_rate: Float
     end
   end
 
@@ -1754,7 +1757,6 @@ module Appsignal
   class Transaction
     HTTP_REQUEST: String
     BACKGROUND_JOB: String
-    SAMPLING_RATE: Float
 
     # Create a new transaction and set it as the currently active
     # transaction.

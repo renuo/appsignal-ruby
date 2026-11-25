@@ -789,6 +789,28 @@ describe Appsignal::Config do
       )
     end
 
+    context "with a sampling rate in the config file" do
+      let(:config_path) { File.join(tmp_dir, "sampling_rate_project") }
+      let(:config) { described_class.new(config_path, "production") }
+      before do
+        write_file(
+          File.join(config_path, "config", "appsignal.yml"),
+          "production:\n  push_api_key: abc\n  sampling_rate: 0.05\n"
+        )
+      end
+      after { FileUtils.rm_rf(config_path) }
+
+      it "reads the sampling rate from the file" do
+        expect(config[:sampling_rate]).to eq(0.05)
+      end
+
+      it "prefers the APPSIGNAL_SAMPLING_RATE environment variable" do
+        ENV["APPSIGNAL_SAMPLING_RATE"] = "0.5"
+
+        expect(config[:sampling_rate]).to eq(0.5)
+      end
+    end
+
     describe "overriding system and defaults config" do
       let(:config) do
         build_config(
@@ -912,6 +934,7 @@ describe Appsignal::Config do
         :response_headers => ["x-response-1", "x-response-2"],
         :revision => "v2.5.1",
         :running_in_container => true,
+        :sampling_rate => 0.25,
         :send_environment_metadata => false,
         :send_function_parameters => true,
         :send_params => false,
@@ -1008,7 +1031,8 @@ describe Appsignal::Config do
         "APPSIGNAL_RESPONSE_HEADERS" => "x-response-1,x-response-2",
 
         # Floats
-        "APPSIGNAL_CPU_COUNT" => "1.5"
+        "APPSIGNAL_CPU_COUNT" => "1.5",
+        "APPSIGNAL_SAMPLING_RATE" => "0.25"
       }
     end
     before do
@@ -1158,6 +1182,7 @@ describe Appsignal::Config do
         :request_headers                => [],
         :response_headers               => [],
         :revision                       => "v2.5.1",
+        :sampling_rate                  => 1.0,
         :send_environment_metadata      => true,
         :send_function_parameters       => true,
         :send_params                    => true,
