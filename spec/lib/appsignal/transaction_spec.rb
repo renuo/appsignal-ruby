@@ -558,6 +558,124 @@ describe Appsignal::Transaction do
         keep_transactions { transaction.complete }
         expect(transaction).to include_tags("foo" => "bar")
       end
+
+      context "when the sampling rate is set to 0.2" do
+        let(:options) { { :sampling_rate => 0.2 } }
+
+        context "and we are lucky" do
+          before do
+            allow(transaction).to receive(:rand).and_return(0.1)
+          end
+
+          it "samples the transaction" do
+            transaction.add_tags(:foo => "bar")
+            transaction.complete
+            expect(transaction).to be_completed
+            expect(transaction).not_to be_paused
+            expect(transaction).not_to be_discarded
+          end
+        end
+
+        context "and we are unlucky" do
+          before do
+            allow(transaction).to receive(:rand).and_return(0.3)
+          end
+
+          it "does not sample the transaction" do
+            transaction.add_tags(:foo => "bar")
+            transaction.complete
+            expect(transaction).not_to be_completed
+            expect(transaction).to be_paused
+            expect(transaction).to be_discarded
+          end
+
+          context "but an error occurred" do
+            before do
+              transaction.set_error(StandardError.new("I am evil"))
+            end
+
+            it "samples the transaction" do
+              transaction.add_tags(:foo => "bar")
+              transaction.complete
+              expect(transaction).to be_completed
+              expect(transaction).not_to be_paused
+              expect(transaction).not_to be_discarded
+            end
+          end
+        end
+      end
+
+      context "when the sampling rate is set to 1" do
+        let(:options) { { :sampling_rate => 1.0 } }
+
+        before do
+          allow(transaction).to receive(:rand).and_return(0.99)
+        end
+
+        it "always samples the transaction" do
+          transaction.add_tags(:foo => "bar")
+          transaction.complete
+          expect(transaction).to be_completed
+          expect(transaction).not_to be_paused
+          expect(transaction).not_to be_discarded
+        end
+      end
+
+      context "when the sampling rate is set to 0" do
+        let(:options) { { :sampling_rate => 0.0 } }
+
+        before do
+          allow(transaction).to receive(:rand).and_return(0.01)
+        end
+
+        it "never samples the transaction" do
+          transaction.add_tags(:foo => "bar")
+          transaction.complete
+          expect(transaction).not_to be_completed
+          expect(transaction).to be_paused
+          expect(transaction).to be_discarded
+        end
+      end
+
+      context "when the sampling rate is NOT set" do
+        it { expect(Appsignal.config[:sampling_rate]).to eq(1.0) }
+      end
+
+      context "when the sampling rate is set to 0 and multiple errors occurred" do
+        let(:options) { { :sampling_rate => 0.0 } }
+
+        it "reports every error" do
+          transaction.add_error(ExampleStandardError.new("first error"))
+          transaction.add_error(ExampleStandardError.new("second error"))
+
+          expect do
+            transaction.complete
+          end.to change { created_transactions.count }.from(1).to(2)
+          expect(created_transactions).to all(be_completed)
+        end
+      end
+
+      describe "completing a transaction when the sampling rate is set to 0" do
+        let(:options) { { :sampling_rate => 0.0 } }
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          transaction.set_action("SomeController#action")
+          transaction.complete
+
+          expect(root_span.attributes["appsignal.ignore_subtrace"]).to be(true)
+        end
+
+        it "with an error in collector mode", :collector_mode do
+          start_collector_agent
+          transaction.set_action("SomeController#action")
+          transaction.add_error(ExampleStandardError.new("error"))
+          transaction.complete
+
+          expect(root_span.attributes).not_to have_key("appsignal.ignore_subtrace")
+          expect(exception_events.count).to eq(1)
+        end
+      end
     end
 
     context "when transaction is not being sampled" do

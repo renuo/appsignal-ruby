@@ -323,12 +323,22 @@ module Appsignal
     end
 
     # @!visibility private
+    def error?
+      !@error_set.nil?
+    end
+
+    # @!visibility private
     def complete
       # Completing is idempotent: a transaction can be completed explicitly and
       # then again by a `complete_current!` cleanup path. Re-running would, for a
       # multi-error transaction, re-record the extra errors (a second duplicate
       # in agent mode, or an event on an already-finished span in collector mode).
       return if completed?
+
+      if !error? && (rand > sampling_rate)
+        pause!
+        discard!
+      end
 
       if discarded?
         Appsignal.internal_logger.debug "Skipping transaction '#{transaction_id}' " \
@@ -1165,6 +1175,11 @@ module Appsignal
     end
 
     private
+
+    # Without a config, report every transaction.
+    def sampling_rate
+      Appsignal.config&.[](:sampling_rate) || 1.0
+    end
 
     # The `SampleData` bucket a logical params channel is stored in, per the
     # backend's `params_mapping`. In agent mode every channel resolves to the

@@ -1587,6 +1587,10 @@ module Appsignal
       # _@return_ — CPU count override for metrics collection
       sig { returns(Float) }
       attr_accessor :cpu_count
+
+      # _@return_ — Share of transactions without errors to report, from 0.0 to 1.0
+      sig { returns(Float) }
+      attr_accessor :sampling_rate
     end
   end
 
