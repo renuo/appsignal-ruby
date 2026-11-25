@@ -86,6 +86,28 @@ module Appsignal
         end
       end
 
+      # Complete the current transaction, if still running, and create a new one.
+      #
+      # @see .create
+      # @param namespace [String] Namespace of the to be created transaction.
+      # @param options Passed on to {.create}. See there for the accepted keys.
+      # @return [Transaction]
+      # @!visibility private
+      def create!(namespace, **options)
+        if current?
+          running = current
+          Appsignal.internal_logger.info(
+            "Transaction '#{running.transaction_id}' is still running. " \
+              "Completing it and creating a new one. " \
+              "(namespace: '#{running.namespace}', action: #{running.action.inspect}, " \
+              "caller: #{caller_locations(1, 1).first})"
+          )
+        end
+
+        complete_current!
+        create(namespace, **options)
+      end
+
       # Add a block, if given, to be executed after a transaction is created.
       # The block will be called with the transaction as an argument.
       # Returns the array of blocks that will be executed after a transaction
@@ -140,16 +162,21 @@ module Appsignal
       end
 
       # Returns currently active transaction or a {NilTransaction} if none is
-      # active.
+      # active. A transaction that is already completed but not yet cleared is
+      # not considered active.
       #
       # @see .current?
       # @return [Appsignal::Transaction, Appsignal::Transaction::NilTransaction]
       def current
-        Thread.current[:appsignal_transaction] || NilTransaction.new
+        transaction = Thread.current[:appsignal_transaction]
+        return NilTransaction.new if transaction.nil? || transaction.completed?
+
+        transaction
       end
 
-      # Returns if any transaction is currently active or not. A
-      # {NilTransaction} is not considered an active transaction.
+      # Returns if any transaction is currently active or not. A transaction
+      # that is already completed but not yet cleared is not considered
+      # active. A {NilTransaction} is not considered an active transaction.
       #
       # @see .current
       # @return [Boolean]
@@ -817,7 +844,7 @@ module Appsignal
     # @return [void]
     #
     # @see Helpers::Instrumentation#add_custom_data
-    # @see https://docs.appsignal.com/guides/custom-data/sample-data.html
+    # @see https://docs.appsignal.com/guides/custom-data/custom-data
     #   Sample data guide
     def add_custom_data(data)
       @custom_data.add(data)
@@ -1341,9 +1368,11 @@ module Appsignal
       # Pass raw Ruby through to the backend. ExtensionBackend serializes to a
       # C-extension `Data` object; OpenTelemetryBackend reads the Hash/Array
       # directly. The `RuntimeError` rescue still covers ExtensionBackend's
-      # `Data.generate`, which now runs inside the backend call.
+      # `Data.generate`, which now runs inside the backend call. The
+      # `JSON::JSONError` rescue covers OpenTelemetryBackend's JSON
+      # serialization.
       @backend.set_sample_data(key.to_s, data)
-    rescue RuntimeError => e
+    rescue RuntimeError, JSON::JSONError => e
       begin
         inspected_data = data.inspect
         Appsignal.internal_logger.error(

@@ -1,5 +1,21 @@
 # AppSignal OpenTelemetry gem Changelog
 
+## 5.0.7
+
+_Published on 2026-10-23._
+
+### Changed
+
+- Update appsignal dependency to 5.0.7. (patch)
+
+## 5.0.6
+
+_Published on 2026-10-22._
+
+### Changed
+
+- Update appsignal dependency to 5.0.6. (patch)
+
 ## 5.0.5
 
 _Published on 2026-10-14._

@@ -211,6 +211,19 @@ describe Appsignal::Rack::EventHandler do
       end
     end
 
+    context "when a transaction from a previous request is still current" do
+      it_in_both_modes "completes it and creates a new transaction" do
+        use_test_logger
+        stale_transaction = create_transaction
+
+        on_start
+
+        expect(stale_transaction).to be_completed
+        expect(last_transaction).to_not eq(stale_transaction)
+        expect(Appsignal::Transaction.current).to eq(last_transaction)
+      end
+    end
+
     it_in_both_modes "registers transaction on the request environment" do
       use_test_logger
       on_start
@@ -333,7 +346,7 @@ describe Appsignal::Rack::EventHandler do
     def expect_setup_failure_cleanup(method)
       use_test_logger
       transaction = new_transaction
-      set_current_transaction(transaction)
+      allow(Appsignal::Transaction).to receive(:new).and_return(transaction)
       allow(transaction).to receive(method).and_call_original
       expect(transaction).to receive(method)
         .and_raise(ExampleStandardError, "setup failed")
@@ -368,7 +381,7 @@ describe Appsignal::Rack::EventHandler do
       end
     end
 
-    def expect_serialization_failure_cleanup
+    def expect_invalid_utf8_exported
       use_test_logger
       previous_context = ::OpenTelemetry::Context.current
       on_start
@@ -379,11 +392,14 @@ describe Appsignal::Rack::EventHandler do
       expect { finish_request(request) }.not_to raise_error
       expect(Appsignal::Transaction.current?).to be(false)
       expect(::OpenTelemetry::Context.current).to eq(previous_context)
-      expect(root_span).not_to be_nil
-      expect(logs).to contains_log(:error, /.*JSON::GeneratorError/)
+      # The invalid bytes are replaced, so the data serializes instead of
+      # failing the completion.
+      expect(JSON.parse(root_span.attributes["appsignal.custom_data"]))
+        .to eq("invalid" => "�")
+      expect(logs).not_to contains_log(:error, /JSON::GeneratorError/)
 
-      # Puma can invoke the fallback after on_finish. It must not retry the
-      # failed serialization or detach an already released context.
+      # Puma can invoke the fallback after on_finish. It must not complete the
+      # transaction again or detach an already released context.
       expect { request.env[Appsignal::Rack::RACK_AFTER_REPLY].each(&:call) }.not_to raise_error
       expect(span_exporter.finished_spans.count { |span| span.kind == :server }).to eq(1)
 
@@ -413,9 +429,9 @@ describe Appsignal::Rack::EventHandler do
         expect_completion_failure_cleanup
       end
 
-      it "releases the collector context when serialization fails", :collector_mode do
+      it "exports invalid UTF-8 data and releases the collector context", :collector_mode do
         start_collector_agent
-        expect_serialization_failure_cleanup
+        expect_invalid_utf8_exported
       end
     end
 
@@ -434,9 +450,9 @@ describe Appsignal::Rack::EventHandler do
         expect_completion_failure_cleanup
       end
 
-      it "releases the collector context when serialization fails", :collector_mode do
+      it "exports invalid UTF-8 data and releases the collector context", :collector_mode do
         start_collector_agent
-        expect_serialization_failure_cleanup
+        expect_invalid_utf8_exported
       end
     end
 

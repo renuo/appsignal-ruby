@@ -8,7 +8,7 @@
 module Appsignal
   extend Appsignal::Helpers::Metrics
   extend Appsignal::Helpers::Instrumentation
-  VERSION = T.let("5.0.5", T.untyped)
+  VERSION = T.let("5.0.7", T.untyped)
 
   class << self
     # The loaded AppSignal configuration.
@@ -1933,14 +1933,16 @@ module Appsignal
     def self.create(namespace, opentelemetry_context: nil, opentelemetry_scope: nil, opentelemetry_kind: nil, opentelemetry_relationship: nil); end
 
     # Returns currently active transaction or a {NilTransaction} if none is
-    # active.
+    # active. A transaction that is already completed but not yet cleared is
+    # not considered active.
     # 
     # _@see_ `.current?`
     sig { returns(T.any(Appsignal::Transaction, Appsignal::Transaction::NilTransaction)) }
     def self.current; end
 
-    # Returns if any transaction is currently active or not. A
-    # {NilTransaction} is not considered an active transaction.
+    # Returns if any transaction is currently active or not. A transaction
+    # that is already completed but not yet cleared is not considered
+    # active. A {NilTransaction} is not considered an active transaction.
     # 
     # _@see_ `.current`
     sig { returns(T::Boolean) }
@@ -2095,7 +2097,7 @@ module Appsignal
     # 
     # _@see_ `Helpers::Instrumentation#add_custom_data`
     # 
-    # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+    # _@see_ `https://docs.appsignal.com/guides/custom-data/custom-data` — Sample data guide
     sig { params(data: T.any(T::Hash[Object, Object], T::Array[Object])).void }
     def add_custom_data(data); end
 

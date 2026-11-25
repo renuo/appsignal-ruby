@@ -1777,13 +1777,15 @@ module Appsignal
                      ) -> Transaction
 
     # Returns currently active transaction or a {NilTransaction} if none is
-    # active.
+    # active. A transaction that is already completed but not yet cleared is
+    # not considered active.
     # 
     # _@see_ `.current?`
     def self.current: () -> (Appsignal::Transaction | Appsignal::Transaction::NilTransaction)
 
-    # Returns if any transaction is currently active or not. A
-    # {NilTransaction} is not considered an active transaction.
+    # Returns if any transaction is currently active or not. A transaction
+    # that is already completed but not yet cleared is not considered
+    # active. A {NilTransaction} is not considered an active transaction.
     # 
     # _@see_ `.current`
     def self.current?: () -> bool
@@ -1927,7 +1929,7 @@ module Appsignal
     # 
     # _@see_ `Helpers::Instrumentation#add_custom_data`
     # 
-    # _@see_ `https://docs.appsignal.com/guides/custom-data/sample-data.html` — Sample data guide
+    # _@see_ `https://docs.appsignal.com/guides/custom-data/custom-data` — Sample data guide
     def add_custom_data: ((::Hash[Object, Object] | ::Array[Object]) data) -> void
 
     # Add breadcrumbs to the transaction.

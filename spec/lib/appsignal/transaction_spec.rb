@@ -264,6 +264,63 @@ describe Appsignal::Transaction do
     end
   end
 
+  describe ".create!" do
+    before do
+      allow(SecureRandom).to receive(:uuid)
+        .and_return("transaction_id_1", "transaction_id_2")
+    end
+
+    def create_transaction!
+      Appsignal::Transaction.create!(default_namespace)
+    end
+
+    context "when no transaction is running" do
+      it "creates a new current transaction" do
+        transaction = create_transaction!
+
+        expect(transaction).to have_id("transaction_id_1")
+        expect(transaction).to eq(current_transaction)
+      end
+
+      it "does not log a still running transaction" do
+        logs = capture_logs { create_transaction! }
+
+        expect(logs).to_not contains_log(:info, /is still running/)
+      end
+    end
+
+    context "when an incomplete transaction is current" do
+      let!(:stale_transaction) { create_transaction }
+
+      it "completes the current transaction" do
+        create_transaction!
+
+        expect(stale_transaction).to be_completed
+      end
+
+      it "creates a new current transaction" do
+        transaction = create_transaction!
+
+        expect(transaction).to have_id("transaction_id_2")
+        expect(transaction).to eq(current_transaction)
+      end
+
+      it "logs the completed transaction and the caller" do
+        stale_transaction.set_action("StaleController#index")
+        message = "Transaction 'transaction_id_1' is still running. " \
+          "Completing it and creating a new one. " \
+          "(namespace: '#{default_namespace}', action: \"StaleController#index\", caller: "
+
+        logs = capture_logs { create_transaction! }
+
+        expect(logs).to contains_log(
+          :info,
+          /#{Regexp.escape(message)}.+transaction_spec\.rb:\d+:in .+create_transaction!/
+        )
+      end
+    end
+  end
+
   # A block handed to AppSignal (an error block, or an after_create/
   # before_complete hook) is user code that can raise. Because these blocks
   # can run far from where they were defined -- an error block runs at
@@ -400,6 +457,20 @@ describe Appsignal::Transaction do
 
       it "returns true for current?" do
         expect(Appsignal::Transaction.current?).to be(true)
+      end
+    end
+
+    context "when the current transaction is completed" do
+      let!(:transaction) { create_transaction }
+      before { transaction.complete }
+
+      it "returns a NilTransaction stub" do
+        expect(current_transaction.nil_transaction?).to be(true)
+        expect(current_transaction).to be_a(Appsignal::Transaction::NilTransaction)
+      end
+
+      it "returns false for current?" do
+        expect(Appsignal::Transaction.current?).to be(false)
       end
     end
 
@@ -4202,9 +4273,10 @@ describe Appsignal::Transaction do
         perform
         logs = capture_logs { transaction.complete }
 
-        expect(root_span.attributes).to_not have_key("appsignal.request.payload")
+        expect(JSON.parse(root_span.attributes["appsignal.request.payload"]))
+          .to eq("[UNSERIALIZABLE VALUE]" => 1)
         expect(logs).to contains_log :error,
-          "Error generating data (RuntimeError: foo) for"
+          /Unable to serialize value: #<.+: to_s raised RuntimeError: foo>/
       end
     end
   end
@@ -4277,9 +4349,10 @@ describe Appsignal::Transaction do
 
     context "when the data cannot be converted" do
       # The direct call skips sanitization, so the raw object reaches the
-      # backend serializer (`Data.generate` in agent mode, `JSON.generate` in
-      # collector mode); both call `to_s` and rescue the resulting error.
-      describe "not updating the sample data" do
+      # backend serializer. In agent mode `Data.generate` raises and the
+      # transaction rescues the error; in collector mode `Utils::JSON` writes a
+      # placeholder instead.
+      describe "storing data that can't be converted" do
         let(:unserializable) do
           Class.new do
             def to_s
@@ -4306,9 +4379,33 @@ describe Appsignal::Transaction do
           logs = capture_logs { perform }
           transaction.complete
 
-          expect(root_span.attributes).to_not have_key("appsignal.request.payload")
+          expect(JSON.parse(root_span.attributes["appsignal.params"]))
+            .to eq("[UNSERIALIZABLE VALUE]" => 1)
           expect(logs).to contains_log :error,
-            "Error generating data (RuntimeError: foo) for"
+            /Unable to serialize value: #<.+: to_s raised RuntimeError: foo>/
+        end
+      end
+    end
+
+    context "when the JSON generation fails" do
+      describe "not updating the sample data" do
+        let(:data) { { "key" => "value" } }
+
+        def perform
+          silence { transaction.send(:set_sample_data, "custom_data", data) }
+        end
+
+        it "in collector mode", :collector_mode do
+          start_collector_agent
+          allow(JSON).to receive(:generate).and_call_original
+          allow(JSON).to receive(:generate).with(data)
+            .and_raise(JSON::GeneratorError, "foo")
+          logs = capture_logs { perform }
+          transaction.complete
+
+          expect(root_span.attributes).to_not have_key("appsignal.custom_data")
+          expect(logs).to contains_log :error,
+            "Error generating data (JSON::GeneratorError: foo) for"
         end
       end
     end
